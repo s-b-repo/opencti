@@ -17,12 +17,14 @@ import {
   HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED,
   HEALTH_CHECK_HEARTBEAT_MISSING,
   HEALTH_CHECK_REGISTRY,
+  HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
   HEALTH_CHECK_USER_MISSING,
   HEALTH_CHECK_USER_MISSING_CAPABILITY,
   HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT,
   type HealthCheckCode,
   type HealthCheckIngestor,
   type HealthCheckUser,
+  type RuntimeDataReadContext,
 } from '../../../../src/modules/ingestionHealth/ingestionHealth-registry';
 import { CONNECTOR_LIVELINESS_GRACE_PERIOD_MS } from '../../../../src/modules/connector/connector-types';
 import { utcDate } from '../../../../src/utils/format';
@@ -352,6 +354,9 @@ describe('execution failed check', () => {
 
 describe('execution failed check details', () => {
   const readDetails = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED].getRuntimeData;
+  // The logs are read from Redis only: the read context is not used
+  const READ = {} as RuntimeDataReadContext;
+  const feeds = (...ids: string[]) => ids.map((id) => ({ internal_id: id, entity_type: 'IngestionRss' }));
   const entry = (level: IngestionLogEntry['level'], meta: Record<string, unknown> = {}): IngestionLogEntry => (
     { timestamp: 1, level, type: 'rss', identifier: 'feed', message: 'm', meta }
   );
@@ -362,23 +367,107 @@ describe('execution failed check details', () => {
   it('should read the details of the last outcome when it is a failure, skipping the progress entries', async () => {
     // Most recent first
     historiesOf({ failed: [entry('info'), entry('warn'), entry('error', { http_status: 404 }), entry('error', { http_status: 500 })] });
-    expect(await readDetails(['failed'])).toEqual(new Map([['failed', { http_status: 404 }]]));
+    expect(await readDetails(feeds('failed'), READ)).toEqual(new Map([['failed', { http_status: 404 }]]));
   });
 
   it('should omit a feed whose last outcome is a success, even when an older failure is still logged', async () => {
     historiesOf({ recovered: [entry('info'), entry('success'), entry('error', { http_status: 404 })] });
-    expect((await readDetails(['recovered'])).has('recovered')).toBe(false);
+    expect((await readDetails(feeds('recovered'), READ)).has('recovered')).toBe(false);
   });
 
   it('should omit a feed whose logs hold no outcome, or no log at all: the failure is reported without details', async () => {
     historiesOf({ progress: [entry('info'), entry('warn')] });
-    const details = await readDetails(['progress', 'empty']);
+    const details = await readDetails(feeds('progress', 'empty'), READ);
     expect(details.size).toBe(0);
   });
 
   it('should not hide a read failure', async () => {
     vi.mocked(redisGetIngestionLogHistory).mockRejectedValue(new Error('redis unavailable'));
-    await expect(readDetails(['failed'])).rejects.toThrow('redis unavailable');
+    await expect(readDetails(feeds('failed'), READ)).rejects.toThrow('redis unavailable');
+  });
+});
+
+describe('source or target access denied check: feeds and syncs', () => {
+  const FAILED_FEED = { ...FEED, last_execution_status: 'error' };
+  const FAILED_SYNC = { ...SYNC, last_execution_status: 'error' };
+  const runtime = (details: object) => ({
+    [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]: details,
+    [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: { kind: 'feed' as const, details },
+  });
+  const ACCESS_DENIED = (http_status: number) => (
+    [{ health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, health_check_metadata: { http_status } }]
+  );
+
+  it('should report SOURCE_OR_TARGET_ACCESS_DENIED instead of FEED_AND_SYNC_EXECUTION_FAILED on a 401', () => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401, http_status_text: 'Unauthorized' }) });
+    expect(checks).toEqual(ACCESS_DENIED(401));
+  });
+
+  it.each([402, 403])('should report SOURCE_OR_TARGET_ACCESS_DENIED on a %s', (status) => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: status }) });
+    expect(checks).toEqual(ACCESS_DENIED(status));
+  });
+
+  it('should report it for a sync too', () => {
+    const checks = computeIngestionHealthChecks(FAILED_SYNC, { ...CONTEXT, runtimeData: runtime({ http_status: 403 }) });
+    expect(checks).toEqual(ACCESS_DENIED(403));
+  });
+
+  it.each([429, 500])('should keep FEED_AND_SYNC_EXECUTION_FAILED on a %s', (status) => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: status }) });
+    expect(checks).toEqual([{ health_check_code: HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, health_check_metadata: { http_status: status } }]);
+  });
+
+  it('should keep FEED_AND_SYNC_EXECUTION_FAILED when the logs hold no details', () => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: {} });
+    expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]);
+  });
+
+  it('should report FEED_AND_SYNC_EXECUTION_FAILED again when SOURCE_OR_TARGET_ACCESS_DENIED is disabled', () => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, {
+      ...CONTEXT,
+      disabledHealthChecks: [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED],
+      runtimeData: runtime({ http_status: 401 }),
+    });
+    expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]);
+  });
+
+  it('should not report it for a feed whose last execution did not fail', () => {
+    expect(computeIngestionHealthChecks(FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401 }) })).toEqual([]);
+  });
+
+  it('should give a critical status', () => {
+    const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401 }) });
+    expect(computeIngestionHealthPatch({}, checks, CONTEXT)?.ingestion_health?.status).toBe(IngestionHealthStatus.Critical);
+  });
+
+  it('should word the message for a feed', () => {
+    const [check] = toGraphqlHealthChecks(ACCESS_DENIED(401), 'IngestionRss');
+    expect(check.health_check_message).toBe('Source denied access: HTTP {http_status}');
+    expect(check.health_check_severity).toBe(IngestionHealthCheckSeverity.Blocking);
+    expect(check.health_check_kind).toBe(IngestionHealthCheckKind.Runtime);
+  });
+
+  // The side is substituted by the backend, so that the front translates four fixed messages
+  it.each([
+    ['a source', { http_status: 401 }, 'Source denied access: HTTP {http_status}'],
+    ['a source with a host', { http_status: 401, host: 'api.example.com' }, 'Source denied access: HTTP {http_status} ({host})'],
+    ['a target', { http_status: 403, connector_type: 'STREAM' }, 'Target denied access: HTTP {http_status}'],
+    ['a target with a host', { http_status: 403, connector_type: 'STREAM', host: 'api.example.com' }, 'Target denied access: HTTP {http_status} ({host})'],
+  ])('should word the message for %s', (_, metadata, message) => {
+    const [check] = toGraphqlHealthChecks([{ health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, health_check_metadata: metadata }], 'Connector');
+    expect(check.health_check_message).toBe(message);
+  });
+
+  it('should read the details of the failing feeds and syncs, as feed values', async () => {
+    const readDetails = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED].getRuntimeData;
+    vi.mocked(redisGetIngestionLogHistory).mockImplementation(async (id: string) => (
+      id === FAILED_FEED.internal_id
+        ? [{ timestamp: 1, level: 'error', type: 'rss', identifier: 'feed', message: 'm', meta: { http_status: 401 } }]
+        : []
+    ));
+    const values = await readDetails([FAILED_FEED, FAILED_SYNC], {} as RuntimeDataReadContext);
+    expect(values).toEqual(new Map([[FAILED_FEED.internal_id, { kind: 'feed', details: { http_status: 401 } }]]));
   });
 });
 

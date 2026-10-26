@@ -1056,6 +1056,7 @@
   "Source connector": "Conector fuente",
   "Source entity": "Entidad de origen",
   "Source name": "Nombre de la fuente",
+  "Source or target denied access": "Acceso denegado por el origen o el destino",
   "Source type": "Tipo de fuente",
   "Source URI": "URI de origen",
   "SRC": "SRC",
