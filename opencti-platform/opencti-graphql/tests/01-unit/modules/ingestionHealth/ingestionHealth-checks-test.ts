@@ -535,12 +535,8 @@ describe('source or target access denied check: managed connectors', () => {
     expect(evaluate(MANAGED, connectorState({ last_work: work, composer_logs: [DENIED_LINE] }))).toEqual([]);
   });
 
-  it('should fall back to the composer logs when the work is not conclusive', () => {
-    const state = connectorState({ last_work: { timestamp: 't', processed_time: null }, composer_logs: [DENIED_LINE] });
-    expect(evaluate(MANAGED, state)).toEqual(accessDenied(DENIED));
-  });
-
-  it('should fall back to the composer logs when the work is older than the last run', () => {
+  // The processed work of the run before, the last run having left its work open (a connector publishing only its successes)
+  it('should fall back to the composer logs when the last processed work is older than the last run', () => {
     const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [] };
     const state = connectorState({ last_work: work, connector_info: { last_run_datetime: '2026-10-13T11:30:00Z' }, composer_logs: [DENIED_LINE] });
     expect(evaluate(MANAGED, state)).toEqual(accessDenied(DENIED));

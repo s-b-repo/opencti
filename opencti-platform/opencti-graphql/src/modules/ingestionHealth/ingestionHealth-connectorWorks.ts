@@ -7,7 +7,8 @@ import { redisGetConnectorLogs } from '../connector/connector-redis';
 import type { BasicStoreEntityConnector, ConnectorInfo } from '../connector/connector-types';
 import type { HealthCheckIngestor, RuntimeDataReadContext } from './ingestionHealth-registry';
 
-const CONNECTOR_TYPE_EXTERNAL_IMPORT = 'EXTERNAL_IMPORT';
+// A stream pushes events as they come: it creates no work
+const CONNECTOR_TYPE_STREAM = 'STREAM';
 // Source of the errors a connector reports on its own work (the worker ones carry the element as source)
 const WORK_ERROR_SOURCE_CONNECTOR = 'CONNECTOR';
 // A work is processed a few seconds to minutes after the end of its run: last_run_datetime is the end of the run
@@ -28,6 +29,7 @@ export interface ConnectorWork {
 export interface ConnectorRuntimeState {
   connector_type: string;
   connector_info?: ConnectorInfo | null;
+  // The most recent processed work: absent for a stream, and when purged or never run
   last_work?: ConnectorWork;
   // Only read when asked
   composer_logs?: string[];
@@ -39,9 +41,9 @@ export interface ConnectorRuntimeState {
  *
  * - connector_info is read from Elasticsearch, not from the cache: pings update it without refreshing the cache
  *   (same reason as findRegularlyPingingConnectors).
- * - last work: EXTERNAL_IMPORT reads the most recent work, processed or not: getConclusiveWork tells whether the last run
- *   ended. The other types run on demand (a stream has no run, an enrichment runs per entity): they read the most recent
- *   processed work, an open one says nothing yet.
+ * - last work: the most recent processed work, for every type. An open one says nothing yet, and reading it would clear
+ *   the checks during every run of an external import. A run that left no work is caught by getConclusiveWork (last_run_datetime).
+ *   A stream has no work: none is read.
  * Connectors not found are omitted.
  */
 export const loadConnectorsRuntimeState = async (
@@ -59,13 +61,13 @@ export const loadConnectorsRuntimeState = async (
     baseData: true,
     baseFields: ['connector_type', 'connector_info'],
   });
+  const processedOnly = addFilter(null, 'processed_time', [], FilterOperator.NotNil);
   await Promise.all(connectors.map(async (connector) => {
-    const filters = connector.connector_type === CONNECTOR_TYPE_EXTERNAL_IMPORT
-      ? null
-      : addFilter(null, 'processed_time', [], FilterOperator.NotNil);
     const [works, composerLogs] = await Promise.all([
-      // work.js is untyped: elPaginate without connectionFormat returns the hits
-      worksForConnector(context, user, connector.internal_id, { first: 1, filters }) as unknown as Promise<ConnectorWork[]>,
+      connector.connector_type === CONNECTOR_TYPE_STREAM
+        ? []
+        // work.js is untyped: elPaginate without connectionFormat returns the hits
+        : worksForConnector(context, user, connector.internal_id, { first: 1, filters: processedOnly }) as unknown as Promise<ConnectorWork[]>,
       options.withComposerLogs ? redisGetConnectorLogs(connector.internal_id) : undefined,
     ]);
     states.set(connector.internal_id, {
@@ -83,9 +85,9 @@ export const loadConnectorsRuntimeState = async (
  *
  * Not conclusive:
  * - no work: purged, or never run
- * - not processed: still open, or force-closed. Says nothing yet.
- * - processed long before the end of the last run: the last run left no work (it failed before creating one),
- *   the work is the one of an earlier run. Skipped when last_run_datetime is unknown.
+ * - not processed: still open, or force-closed. Says nothing yet (the reader only returns processed works: a guard).
+ * - processed long before the end of the last run: the last run left no processed work (it failed before creating one,
+ *   or left it open, publishing only its successes), the work is the one of an earlier run. Skipped when last_run_datetime is unknown.
  */
 export const getConclusiveWork = (state: ConnectorRuntimeState): ConnectorWork | undefined => {
   const work = state.last_work;

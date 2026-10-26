@@ -10,7 +10,8 @@ import { storeLoadById } from '../../../src/database/middleware-loader';
 import { resetCacheForEntity } from '../../../src/database/cache';
 import { patchAttribute } from '../../../src/database/middleware';
 import { getClientBase } from '../../../src/database/redis';
-import { createWork, updateProcessedTime } from '../../../src/domain/work';
+import { createWork, loadWorkById, updateProcessedTime } from '../../../src/domain/work';
+import { elUpdate } from '../../../src/database/engine';
 import { ENTITY_TYPE_CONNECTOR, ENTITY_TYPE_USER } from '../../../src/schema/internalObject';
 import { ConnectorType, IngestionHealthStatus } from '../../../src/generated/graphql';
 import {
@@ -24,7 +25,7 @@ import {
 } from '../../../src/modules/ingestionHealth/ingestionHealth-registry';
 import type { IngestionHealthFields } from '../../../src/modules/ingestionHealth/ingestionHealth-types';
 import type { BasicStoreEntity } from '../../../src/types/store';
-import type { BasicStoreEntityConnector } from '../../../src/modules/connector/connector-types';
+import type { BasicStoreEntityConnector, ConnectorInfo } from '../../../src/modules/connector/connector-types';
 import { addIngestion, ingestionDelete, patchRssIngestion } from '../../../src/modules/ingestion/ingestion-rss-domain';
 import { ENTITY_TYPE_INGESTION_RSS } from '../../../src/modules/ingestion/ingestion-types';
 
@@ -182,10 +183,12 @@ describe('Ingestion health manager: connector running as a regular user', () => 
 // Scenario: an external import connector, run by a service account and pinging continuously, fails its runs.
 // First unmanaged: its last work in error is reported (CONNECTOR_LAST_WORK_FAILED, advisory). Then managed by the composer
 // (catalog_id set): the same kind of failure with an HTTP 401 is reported as SOURCE_OR_TARGET_ACCESS_DENIED (blocking), which
-// supersedes the other check. When the new run is still open, the composer logs tell the same. A run ending without error recovers it.
+// supersedes the other check. When a run ends leaving its work open, after a clean one, the composer logs tell the same.
+// A run ending without error recovers it.
 describe('Ingestion health manager: connector runtime checks', () => {
   const CONNECTOR_ID = '5d1a5c3e-8b0f-4f43-9a52-6f3f0c1e2a11';
   const CONNECTOR_NAME = 'Ingestion health runtime checks connector';
+  const ONE_HOUR_MS = 60 * 60 * 1000;
   const ACCESS_DENIED_ERROR = '401 Client Error: Unauthorized for url: https://api.example.com/x';
   const ACCESS_DENIED_CHECK = {
     health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
@@ -195,11 +198,13 @@ describe('Ingestion health manager: connector runtime checks', () => {
   let publishUserActionSpy: MockInstance;
   let resolveSettingsSpy: MockInstance;
 
-  const pingAsRunningConnector = () => pingConnector(testContext, ADMIN_USER, CONNECTOR_ID, null, {
+  // pycti also sends the end of the last run, once a run is over
+  const pingAsRunningConnector = (connectorInfo: Partial<ConnectorInfo> = {}) => pingConnector(testContext, ADMIN_USER, CONNECTOR_ID, null, {
     run_and_terminate: false,
     buffering: false,
     queue_threshold: 500,
     queue_messages_size: 0,
+    ...connectorInfo,
   });
 
   // The manager reads users and connectors from the cache, refreshed asynchronously by the platform events:
@@ -231,6 +236,17 @@ describe('Ingestion health manager: connector runtime checks', () => {
     expect(work).toBeDefined();
     await updateProcessedTime(testContext, ADMIN_USER, work?.id, error, !!error);
     return work;
+  };
+
+  // A run that ended long ago, which the test cannot wait for: the work keeps its timestamp, so it stays the most recent
+  const setProcessedTime = async (workId: string | undefined, processedTime: string) => {
+    const work = await loadWorkById(testContext, ADMIN_USER, workId);
+    if (!work) {
+      throw new Error(`Work ${workId} not found`);
+    }
+    await elUpdate(testContext, work._index, work.id, {
+      script: { source: 'ctx._source.processed_time = params.processed_time;', lang: 'painless', params: { processed_time: processedTime } },
+    });
   };
 
   beforeAll(async () => {
@@ -290,13 +306,19 @@ describe('Ingestion health manager: connector runtime checks', () => {
     expect(events[1]).toMatchObject({ event_scope: 'critical', status: 'error' });
   });
 
-  it('should keep the access denied while the new run is open, read from the composer logs', async () => {
-    // The new run has not ended: its work is open and says nothing yet. The 401 is only in the logs of the composer
-    await addWork('Run in progress');
+  it('should keep the access denied when the last run left its work open, read from the composer logs', async () => {
+    // The run before ended without error an hour ago: its work is processed, without error
+    const cleanWork = await addProcessedWork('Run succeeded an hour ago');
+    await setProcessedTime(cleanWork?.id, new Date(Date.now() - ONE_HOUR_MS).toISOString());
+    // The last run failed on a 401: a connector publishing only its successes leaves its work open, the 401 is only in the
+    // logs of the composer, after the clean work
+    await addWork('Run left open');
     await redisSetConnectorLogs(CONNECTOR_ID, [
       JSON.stringify({ timestamp: new Date().toISOString(), level: 'INFO', name: 'connector', message: 'Connector starts a run', attributes: {} }),
       JSON.stringify({ timestamp: new Date().toISOString(), level: 'ERROR', name: 'connector', message: ACCESS_DENIED_ERROR, attributes: {} }),
     ]);
+    // The end of the last run: the clean work, processed long before, is not the one of the last run and concludes nothing
+    await pingAsRunningConnector({ last_run_datetime: new Date().toISOString() });
     await runManagerPeriod();
     const health = await loadConnectorHealth();
     expect(health?.status).toBe(IngestionHealthStatus.Critical);
