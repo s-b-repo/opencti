@@ -16,6 +16,11 @@ vi.mock('../../../../src/domain/work', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/domain/work')>()),
   worksForConnector: vi.fn(),
 }));
+// Lowered so that the bound shows with a few connectors
+vi.mock('../../../../src/database/engine', async (importActual) => ({
+  ...(await importActual<typeof import('../../../../src/database/engine')>()),
+  ES_MAX_CONCURRENCY: 2,
+}));
 vi.mock('../../../../src/modules/connector/connector-redis', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/modules/connector/connector-redis')>()),
   redisGetConnectorLogs: vi.fn(),
@@ -60,6 +65,28 @@ describe('loadConnectorsRuntimeState', () => {
     const states = await loadConnectorsRuntimeState(connectorsOfTypes({ stream: 'STREAM' }), READ, { withComposerLogs: true });
     expect(worksForConnector).not.toHaveBeenCalled();
     expect(states.get('stream')).toEqual({ connector_type: 'STREAM', connector_info: null, last_work: undefined, composer_logs: ['line'] });
+  });
+
+  it('should read at most ES_MAX_CONCURRENCY connectors at once', async () => {
+    let running = 0;
+    let maxRunning = 0;
+    vi.mocked(worksForConnector).mockImplementation(async () => {
+      running += 1;
+      maxRunning = Math.max(maxRunning, running);
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5);
+      });
+      running -= 1;
+      return [];
+    });
+    const states = await loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT', c2: 'EXTERNAL_IMPORT', c3: 'EXTERNAL_IMPORT', c4: 'EXTERNAL_IMPORT', c5: 'EXTERNAL_IMPORT' }), READ, { withComposerLogs: false });
+    expect(states.size).toBe(5);
+    expect(maxRunning).toBe(2);
+  });
+
+  it('should reject when a read fails: a failure must not be read as a missing value', async () => {
+    vi.mocked(worksForConnector).mockRejectedValue(new Error('elastic unavailable'));
+    await expect(loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT' }), READ, { withComposerLogs: false })).rejects.toThrow('elastic unavailable');
   });
 });
 

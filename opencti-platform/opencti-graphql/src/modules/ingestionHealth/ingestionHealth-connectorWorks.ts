@@ -1,6 +1,8 @@
+import { Promise as BluePromise } from 'bluebird';
 import { FilterOperator } from '../../generated/graphql';
 import { ENTITY_TYPE_CONNECTOR } from '../../schema/internalObject';
 import { fullEntitiesList } from '../../database/middleware-loader';
+import { ES_MAX_CONCURRENCY } from '../../database/engine';
 import { worksForConnector } from '../../domain/work';
 import { addFilter } from '../../utils/filtering/filtering-utils';
 import { redisGetConnectorLogs } from '../connector/connector-redis';
@@ -38,6 +40,7 @@ export interface ConnectorRuntimeState {
 /**
  * Reads, for the connectors of the ingestors, what the runtime checks judge: connector_info, last work, composer logs.
  * A read failure rejects: it must not be read as a missing value (registry contract).
+ * The connectors are read ES_MAX_CONCURRENCY at a time: a platform may have hundreds.
  *
  * - connector_info is read from Elasticsearch, not from the cache: pings update it without refreshing the cache
  *   (same reason as findRegularlyPingingConnectors).
@@ -62,7 +65,7 @@ export const loadConnectorsRuntimeState = async (
     baseFields: ['connector_type', 'connector_info'],
   });
   const processedOnly = addFilter(null, 'processed_time', [], FilterOperator.NotNil);
-  await Promise.all(connectors.map(async (connector) => {
+  await BluePromise.map(connectors, async (connector) => {
     const [works, composerLogs] = await Promise.all([
       connector.connector_type === CONNECTOR_TYPE_STREAM
         ? []
@@ -76,7 +79,7 @@ export const loadConnectorsRuntimeState = async (
       last_work: works[0],
       ...(composerLogs ? { composer_logs: composerLogs } : {}),
     });
-  }));
+  }, { concurrency: ES_MAX_CONCURRENCY });
   return states;
 };
 
