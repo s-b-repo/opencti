@@ -4,16 +4,21 @@ import { ingestionHealthHandler } from '../../../src/manager/ingestionHealthMana
 import * as userActionListener from '../../../src/listener/UserActionListener';
 import * as ingestionHealthSettings from '../../../src/modules/ingestionHealth/ingestionHealth-settings';
 import { connectorDelete, pingConnector, registerConnector } from '../../../src/modules/connector/connector-domain';
-import { redisSetConnectorHeartbeat } from '../../../src/modules/connector/connector-redis';
+import { redisSetConnectorHeartbeat, redisSetConnectorLogs } from '../../../src/modules/connector/connector-redis';
 import { addUser, userDelete, userEditField } from '../../../src/modules/user/user-domain';
 import { storeLoadById } from '../../../src/database/middleware-loader';
 import { resetCacheForEntity } from '../../../src/database/cache';
+import { patchAttribute } from '../../../src/database/middleware';
+import { getClientBase } from '../../../src/database/redis';
+import { createWork, updateProcessedTime } from '../../../src/domain/work';
 import { ENTITY_TYPE_CONNECTOR, ENTITY_TYPE_USER } from '../../../src/schema/internalObject';
 import { ConnectorType, IngestionHealthStatus } from '../../../src/generated/graphql';
 import {
+  HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED,
   HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED,
   HEALTH_CHECK_HEARTBEAT_MISSING,
   HEALTH_CHECK_REGISTRY,
+  HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
   HEALTH_CHECK_USER_MISSING,
   HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT,
 } from '../../../src/modules/ingestionHealth/ingestionHealth-registry';
@@ -171,6 +176,144 @@ describe('Ingestion health manager: connector running as a regular user', () => 
       status: 'success',
       message: `reports \`${CONNECTOR_NAME}\` (${ENTITY_TYPE_CONNECTOR}) as recovered`,
     });
+  });
+});
+
+// Scenario: an external import connector, run by a service account and pinging continuously, fails its runs.
+// First unmanaged: its last work in error is reported (CONNECTOR_LAST_WORK_FAILED, advisory). Then managed by the composer
+// (catalog_id set): the same kind of failure with an HTTP 401 is reported as SOURCE_OR_TARGET_ACCESS_DENIED (blocking), which
+// supersedes the other check. When the new run is still open, the composer logs tell the same. A run ending without error recovers it.
+describe('Ingestion health manager: connector runtime checks', () => {
+  const CONNECTOR_ID = '5d1a5c3e-8b0f-4f43-9a52-6f3f0c1e2a11';
+  const CONNECTOR_NAME = 'Ingestion health runtime checks connector';
+  const ACCESS_DENIED_ERROR = '401 Client Error: Unauthorized for url: https://api.example.com/x';
+  const ACCESS_DENIED_CHECK = {
+    health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+    health_check_metadata: { http_status: 401, host: 'api.example.com', connector_type: 'EXTERNAL_IMPORT' },
+  };
+  let connectorUserId: string;
+  let publishUserActionSpy: MockInstance;
+  let resolveSettingsSpy: MockInstance;
+
+  const pingAsRunningConnector = () => pingConnector(testContext, ADMIN_USER, CONNECTOR_ID, null, {
+    run_and_terminate: false,
+    buffering: false,
+    queue_threshold: 500,
+    queue_messages_size: 0,
+  });
+
+  // The manager reads users and connectors from the cache, refreshed asynchronously by the platform events:
+  // reloaded before each period so that the period sees the last writes (the catalog_id included)
+  const runManagerPeriod = async () => {
+    resetCacheForEntity(ENTITY_TYPE_USER);
+    resetCacheForEntity(ENTITY_TYPE_CONNECTOR);
+    await ingestionHealthHandler({ signal: new AbortController().signal });
+  };
+
+  const loadConnectorHealth = async () => {
+    const connector = await storeLoadById<BasicStoreEntityConnector & IngestionHealthFields>(testContext, ADMIN_USER, CONNECTOR_ID, ENTITY_TYPE_CONNECTOR);
+    return connector.ingestion_health;
+  };
+
+  const connectorHealthEvents = () => publishUserActionSpy.mock.calls
+    .map(([action]) => action)
+    .filter((action) => action.event_type === 'ingestion_health' && action.context_data?.id === CONNECTOR_ID);
+
+  // The works are created one after the other: the manager reads the last one by its timestamp
+  const addWork = async (name: string) => {
+    const connector = await storeLoadById<BasicStoreEntityConnector>(testContext, ADMIN_USER, CONNECTOR_ID, ENTITY_TYPE_CONNECTOR);
+    return createWork(testContext, ADMIN_USER, connector, name, CONNECTOR_ID);
+  };
+
+  // What pycti does at the end of a run: the work is closed, with the error when the run failed
+  const addProcessedWork = async (name: string, error?: string) => {
+    const work = await addWork(name);
+    expect(work).toBeDefined();
+    await updateProcessedTime(testContext, ADMIN_USER, work?.id, error, !!error);
+    return work;
+  };
+
+  beforeAll(async () => {
+    publishUserActionSpy = vi.spyOn(userActionListener, 'publishUserAction').mockResolvedValue([]);
+    resolveSettingsSpy = vi.spyOn(ingestionHealthSettings, 'resolveIngestionHealthSettings').mockReturnValue({ notification_delay: 0, disabled_health_checks: [] });
+    const connectorGroupId = await getGroupIdByName(CONNECTOR_GROUP.name);
+    // A service account: the user checks report nothing, only the runtime checks are looked at
+    const connectorUser = await addUser(testContext, ADMIN_USER, {
+      name: 'Ingestion health runtime checks connector user',
+      user_service_account: true,
+      groups: [connectorGroupId],
+      objectOrganization: [],
+      prevent_default_groups: true,
+    });
+    connectorUserId = connectorUser.id;
+    await registerConnector(
+      testContext,
+      ADMIN_USER,
+      { id: CONNECTOR_ID, name: CONNECTOR_NAME, type: ConnectorType.ExternalImport },
+      { connector_user_id: connectorUserId },
+    );
+    await pingAsRunningConnector();
+  });
+
+  afterAll(async () => {
+    publishUserActionSpy.mockRestore();
+    resolveSettingsSpy.mockRestore();
+    // Deletes the works of the connector too
+    await connectorDelete(testContext, ADMIN_USER, CONNECTOR_ID);
+    await getClientBase().del(`connector-${CONNECTOR_ID}-logs`);
+    await userDelete(testContext, ADMIN_USER, connectorUserId);
+    resetCacheForEntity(ENTITY_TYPE_USER);
+    resetCacheForEntity(ENTITY_TYPE_CONNECTOR);
+  });
+
+  it('should report the last work failed as degraded for an unmanaged connector', async () => {
+    await addProcessedWork('Run in timeout', 'Timeout');
+    await runManagerPeriod();
+    const health = await loadConnectorHealth();
+    expect(health?.status).toBe(IngestionHealthStatus.Degraded);
+    expect(health?.health_checks).toEqual([{ health_check_code: HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED, health_check_metadata: { error: 'Timeout' } }]);
+    const events = connectorHealthEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ event_scope: 'degraded', status: 'error' });
+  });
+
+  it('should report the access denied as critical, instead of the last work failed, once the connector is managed', async () => {
+    // Managed by the composer: only such a connector has its access denied checked
+    await patchAttribute(testContext, ADMIN_USER, CONNECTOR_ID, ENTITY_TYPE_CONNECTOR, { catalog_id: 'ingestion-health-test-catalog' });
+    await addProcessedWork('Run denied', ACCESS_DENIED_ERROR);
+    await runManagerPeriod();
+    const health = await loadConnectorHealth();
+    expect(health?.status).toBe(IngestionHealthStatus.Critical);
+    expect(health?.health_checks).toEqual([ACCESS_DENIED_CHECK]);
+    const events = connectorHealthEvents();
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({ event_scope: 'critical', status: 'error' });
+  });
+
+  it('should keep the access denied while the new run is open, read from the composer logs', async () => {
+    // The new run has not ended: its work is open and says nothing yet. The 401 is only in the logs of the composer
+    await addWork('Run in progress');
+    await redisSetConnectorLogs(CONNECTOR_ID, [
+      JSON.stringify({ timestamp: new Date().toISOString(), level: 'INFO', name: 'connector', message: 'Connector starts a run', attributes: {} }),
+      JSON.stringify({ timestamp: new Date().toISOString(), level: 'ERROR', name: 'connector', message: ACCESS_DENIED_ERROR, attributes: {} }),
+    ]);
+    await runManagerPeriod();
+    const health = await loadConnectorHealth();
+    expect(health?.status).toBe(IngestionHealthStatus.Critical);
+    expect(health?.health_checks).toEqual([ACCESS_DENIED_CHECK]);
+    // Same status: not notified again
+    expect(connectorHealthEvents()).toHaveLength(2);
+  });
+
+  it('should report the recovery once a run ends without error', async () => {
+    await addProcessedWork('Run succeeded');
+    await runManagerPeriod();
+    const health = await loadConnectorHealth();
+    expect(health?.status).toBe(IngestionHealthStatus.Healthy);
+    expect(health?.health_checks).toEqual([]);
+    const events = connectorHealthEvents();
+    expect(events).toHaveLength(3);
+    expect(events[2]).toMatchObject({ event_scope: 'recovered', status: 'success' });
   });
 });
 
