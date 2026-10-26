@@ -655,6 +655,31 @@ describe('last work failed check', () => {
       .toEqual(failed('GET https://a.example.com/x then http://b.example.com/y failed'));
   });
 
+  it('should remove the query string of a relative url, as urllib3 writes it', () => {
+    const maxRetry = "HTTPSConnectionPool(host='api.x', port=443): Max retries exceeded with url: /v1/feed?apikey=SECRET (Caused by …)";
+    expect(evaluate(IMPORT_CONNECTOR, lastWork([{ message: maxRetry, source: null }])))
+      .toEqual(failed("HTTPSConnectionPool(host='api.x', port=443): Max retries exceeded with url: /v1/feed (Caused by …)"));
+  });
+
+  it('should remove the user and password of an absolute url', () => {
+    expect(evaluate(IMPORT_CONNECTOR, lastWork([{ message: 'GET https://user:secret@api.example.com/x failed', source: null }])))
+      .toEqual(failed('GET https://api.example.com/x failed'));
+  });
+
+  it('should stop the query string at a closing parenthesis or bracket, kept', () => {
+    expect(evaluate(IMPORT_CONNECTOR, lastWork([{ message: 'Timeout (https://api.example.com/x?key=secret) [url=/y?token=1]', source: null }])))
+      .toEqual(failed('Timeout (https://api.example.com/x) [url=/y]'));
+  });
+
+  it('should keep a question mark that does not follow a url or a path', () => {
+    expect(evaluate(IMPORT_CONNECTOR, lastWork([{ message: 'Is the key valid? No', source: null }]))).toEqual(failed('Is the key valid? No'));
+  });
+
+  it('should scrub a long error without a space in linear time', () => {
+    const [check] = evaluate(IMPORT_CONNECTOR, lastWork([{ message: `${'a/'.repeat(50000)}?key=secret`, source: null }]));
+    expect(check.health_check_metadata?.error).toBe('a/'.repeat(100));
+  });
+
   it('should truncate the error to 200 characters', () => {
     const [check] = evaluate(IMPORT_CONNECTOR, lastWork([{ message: 'a'.repeat(300), source: null }]));
     expect(check.health_check_metadata?.error).toBe('a'.repeat(200));

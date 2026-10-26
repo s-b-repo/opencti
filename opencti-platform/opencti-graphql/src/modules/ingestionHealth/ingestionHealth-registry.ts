@@ -247,9 +247,19 @@ const describeFeedAndSyncExecutionFailure = ({ http_status, http_status_text, er
   return error_code ?? error;
 };
 
-// A work error can quote the url called, with its query string: it may hold a token, and it is shown to every reader of the connector
-const URL_QUERY_STRING = /(https?:\/\/[^\s?'"]+)\?\S*/g;
+// A work error can quote the url called, with its query string or its user and password: they may hold a secret,
+// and the error is shown to every reader of the connector, and written in the activity log.
+// The query string of any url or path, absolute or relative (urllib3 writes "with url: /v1/feed?apikey=..."),
+// up to the whitespace, quote, parenthesis or bracket ending it.
+// The path is looked for behind each "?" only, and the scheme is bounded: linear on a long error, a traceback included
+const URL_QUERY_STRING = /\?(?<=\/[^\s'"()[\]?]*\?)[^\s'")\]]*/g;
+const URL_USERINFO = /\b([a-z][a-z\d+.-]{0,30}:\/\/)[^\s/?#@'"]+@/gi;
 const MAX_WORK_ERROR_LENGTH = 200;
+
+const scrubWorkError = (message: string) => message
+  .replace(URL_USERINFO, '$1')
+  .replace(URL_QUERY_STRING, '')
+  .slice(0, MAX_WORK_ERROR_LENGTH);
 
 // Same window as the connector liveness (isConnectorActive).
 // A heartbeat in the future (clock skew between nodes) is alive
@@ -394,7 +404,7 @@ export const HEALTH_CHECK_REGISTRY = {
       }
       // The first message is the one of the connector. Not dated: the metadata must stay the same while the failure lasts
       const message = failure.messages[0];
-      return message ? { error: message.replace(URL_QUERY_STRING, '$1').slice(0, MAX_WORK_ERROR_LENGTH) } : {};
+      return message ? { error: scrubWorkError(message) } : {};
     },
   }),
 } satisfies Record<HealthCheckCode, HealthCheckDefinition>;
