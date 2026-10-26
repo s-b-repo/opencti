@@ -35,7 +35,8 @@ export const parseAccessDenied = (text: string, platformHost?: string): AccessDe
     if (match && httpStatus !== undefined && ACCESS_DENIED_HTTP_STATUSES.includes(httpStatus)) {
       try {
         const url = new URL(match[2]);
-        const isOpenCtiCall = url.host === platformHost || url.pathname.endsWith('/graphql') || url.pathname.startsWith('/storage/');
+        // platformHost is a hostname, without port: compared to the hostname of the URL, whatever the case
+        const isOpenCtiCall = (!!platformHost && url.hostname === platformHost.toLowerCase()) || url.pathname.endsWith('/graphql') || url.pathname.startsWith('/storage/');
         return isOpenCtiCall ? null : { http_status: httpStatus, host: url.host };
       } catch {
         return { http_status: httpStatus };
@@ -59,6 +60,20 @@ const parseComposerLogLine = (line: string): ComposerLogLine | null => {
   } catch {
     return null;
   }
+};
+
+// Every string of a value, nested objects and arrays included: pycti wraps the meta of a log in an "attributes" object
+const collectStrings = (value: unknown): string[] => {
+  if (typeof value === 'string') {
+    return [value];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap(collectStrings);
+  }
+  if (value && typeof value === 'object') {
+    return Object.values(value).flatMap(collectStrings);
+  }
+  return [];
 };
 
 const isAfterOrAt = (timestamp: unknown, date: string) => typeof timestamp === 'string' && new Date(timestamp).getTime() >= new Date(date).getTime();
@@ -92,8 +107,7 @@ export const findAccessDeniedInComposerLogs = (
   // The error may be in any field (message, reason, exc_info...): the most recent line telling an access denied wins
   for (const line of lastRunLines.reverse()) {
     if (line.level === 'ERROR') {
-      const texts = Object.values(line).filter((value): value is string => typeof value === 'string');
-      for (const text of texts) {
+      for (const text of collectStrings(line)) {
         const accessDenied = parseAccessDenied(text, platformHost);
         if (accessDenied) {
           return accessDenied;

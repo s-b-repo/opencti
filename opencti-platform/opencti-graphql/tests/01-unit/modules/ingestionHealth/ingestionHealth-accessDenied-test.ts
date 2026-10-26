@@ -23,6 +23,11 @@ describe('parseAccessDenied', () => {
     expect(parseAccessDenied('403 Client Error: Forbidden for url: http://opencti:8080/storage/get/import/x')).toBeNull();
     expect(parseAccessDenied('401 Client Error: Unauthorized for url: https://cti.acme.com/api', 'cti.acme.com')).toBeNull();
   });
+  it('should compare the platform hostname without the port, whatever the case', () => {
+    expect(parseAccessDenied('401 Client Error: Unauthorized for url: https://cti.acme.com:8443/api', 'cti.acme.com')).toBeNull();
+    expect(parseAccessDenied('401 Client Error: Unauthorized for url: https://CTI.acme.com/api', 'Cti.Acme.com')).toBeNull();
+    expect(parseAccessDenied('401 Client Error: Unauthorized for url: https://other.acme.com:8443/api', 'cti.acme.com')).toEqual({ http_status: 401, host: 'other.acme.com:8443' });
+  });
   it('should return null for a reworded error', () => {
     expect(parseAccessDenied('Invalid API key')).toBeNull();
   });
@@ -33,13 +38,19 @@ describe('parseAccessDenied', () => {
 
 describe('findAccessDeniedInComposerLogs', () => {
   const EVALUATED_AT = '2026-10-26T12:00:00.000Z';
-  const line = (timestamp: string, level: string, message: string, meta: Record<string, string> = {}) => JSON.stringify({ timestamp, level, name: 'c', message, ...meta });
+  const line = (timestamp: string, level: string, message: string, meta: Record<string, unknown> = {}) => JSON.stringify({ timestamp, level, name: 'c', message, ...meta });
   const MARKER = (timestamp: string) => line(timestamp, 'INFO', RUN_END_MARKER);
-  const DENIED = (timestamp: string) => line(timestamp, 'ERROR', 'Error while fetching', { reason: '401 Client Error: Unauthorized for url: https://api.example.com/x' });
+  const DENIED = (timestamp: string) => line(timestamp, 'ERROR', 'Error while fetching', { attributes: { reason: '401 Client Error: Unauthorized for url: https://api.example.com/x' } });
 
-  it('should find an access denied in the last finished run, also inside a meta field', () => {
+  it('should find an access denied in the last finished run, also inside the attributes of the pycti logger', () => {
     const lines = [MARKER('2026-10-26T10:00:00Z'), DENIED('2026-10-26T11:00:01Z'), MARKER('2026-10-26T11:00:02Z')];
     expect(findAccessDeniedInComposerLogs(lines, { evaluatedAt: EVALUATED_AT })).toEqual({ http_status: 401, host: 'api.example.com' });
+  });
+  it('should find an access denied in the message, or in an array of the attributes', () => {
+    const inMessage = line('2026-10-26T11:00:01Z', 'ERROR', '403 Client Error: Forbidden for url: https://api.example.com/x');
+    expect(findAccessDeniedInComposerLogs([inMessage], { evaluatedAt: EVALUATED_AT })).toEqual({ http_status: 403, host: 'api.example.com' });
+    const inArray = line('2026-10-26T11:00:01Z', 'ERROR', 'failed', { attributes: { errors: [{ reason: '401 Client Error: Unauthorized for url: https://api.example.com/x' }] } });
+    expect(findAccessDeniedInComposerLogs([inArray], { evaluatedAt: EVALUATED_AT })).toEqual({ http_status: 401, host: 'api.example.com' });
   });
   it('should ignore an access denied of an older run, before the second-to-last marker', () => {
     const lines = [DENIED('2026-10-26T09:00:01Z'), MARKER('2026-10-26T09:00:02Z'), line('2026-10-26T10:00:00Z', 'INFO', 'ok'), MARKER('2026-10-26T10:00:02Z')];
