@@ -3022,6 +3022,7 @@
   "Last used malwares": "最後に使用されたマルウェア",
   "Last used tools and channels": "最後に使用されたツールとチャンネル",
   "Last verified": "最終確認済み",
+  "Last work failed: {error}": "最後の作業が失敗しました: {error}",
   "Last workflow comment": "ワークフローの最後のコメント",
   "Last year": "過去1年間",
   "Lastname": "苗字",

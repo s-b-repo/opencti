@@ -3022,6 +3022,7 @@
   "Last used malwares": "Derniers malwares utilisés",
   "Last used tools and channels": "Derniers outils et canaux utilisés",
   "Last verified": "Dernière vérification",
+  "Last work failed: {error}": "Échec du dernier work : {error}",
   "Last workflow comment": "Dernier commentaire sur le workflow",
   "Last year": "Dernière année",
   "Lastname": "Nom",

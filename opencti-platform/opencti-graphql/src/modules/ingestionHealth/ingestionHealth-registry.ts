@@ -8,6 +8,7 @@ import { redisGetIngestionLogHistory } from '../../database/redis';
 import { findCapabilityDescription } from '../../database/data-initialization';
 import type { AuthContext, AuthUser } from '../../types/user';
 import { ACCESS_DENIED_HTTP_STATUSES } from './ingestionHealth-accessDenied';
+import { getConclusiveWork, getWorkFailure, loadConnectorsRuntimeState } from './ingestionHealth-connectorWorks';
 
 export const HEALTH_CHECK_USER_MISSING = 'USER_MISSING';
 export const HEALTH_CHECK_USER_MISSING_CAPABILITY = 'USER_MISSING_CAPABILITY';
@@ -15,6 +16,7 @@ export const HEALTH_CHECK_HEARTBEAT_MISSING = 'HEARTBEAT_MISSING';
 export const HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT = 'USER_NOT_SERVICE_ACCOUNT';
 export const HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED = 'FEED_AND_SYNC_EXECUTION_FAILED';
 export const HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED = 'SOURCE_OR_TARGET_ACCESS_DENIED';
+export const HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED = 'CONNECTOR_LAST_WORK_FAILED';
 
 // Every check of the registry: adding a check adds its code here
 export type HealthCheckCode = typeof HEALTH_CHECK_USER_MISSING
@@ -22,7 +24,8 @@ export type HealthCheckCode = typeof HEALTH_CHECK_USER_MISSING
   | typeof HEALTH_CHECK_HEARTBEAT_MISSING
   | typeof HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT
   | typeof HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED
-  | typeof HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED;
+  | typeof HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED
+  | typeof HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED;
 
 // The values read by the runtime checks for one ingestion, by check code.
 // Inferred from the registry: the type of each value is the one returned by the getRuntimeData of its check
@@ -195,6 +198,10 @@ const describeFeedAndSyncExecutionFailure = ({ http_status, http_status_text, er
   return error_code ?? error;
 };
 
+// A work error can quote the url called, with its query string: it may hold a token, and it is shown to every reader of the connector
+const URL_QUERY_STRING = /(https?:\/\/[^\s?'"]+)\?\S*/g;
+const MAX_WORK_ERROR_LENGTH = 200;
+
 // Same window as the connector liveness (isConnectorActive).
 // A heartbeat in the future (clock skew between nodes) is alive
 export const isHeartbeatAlive = (heartbeat: string | undefined, evaluatedAt: string): boolean => {
@@ -301,6 +308,30 @@ export const HEALTH_CHECK_REGISTRY = {
     getFailure: (value) => {
       const httpStatus = value?.details.http_status;
       return httpStatus !== undefined && ACCESS_DENIED_HTTP_STATUSES.includes(httpStatus) ? { http_status: httpStatus } : null;
+    },
+  }),
+  // The last run of the connector ended with an error. Advisory: the connector may still ingest, and the next successful run clears it.
+  // Another work of the connector may have succeeded since: only the last conclusive one is judged
+  [HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]: defineRuntimeCheck({
+    kind: IngestionHealthCheckKind.Runtime,
+    label: 'Last work failed',
+    severity: IngestionHealthCheckSeverity.Advisory,
+    message: ({ error }) => (error ? 'Last work failed: {error}' : 'Last work failed'),
+    // A stream has no work. Managed or not: the work is reported by the connector itself
+    isEnabled: (ingestor) => ingestor.entity_type === ENTITY_TYPE_CONNECTOR && ingestor.connector_type !== 'STREAM',
+    getRuntimeData: (ingestors, read) => loadConnectorsRuntimeState(ingestors, read, { withComposerLogs: false }),
+    // When the access was denied, SOURCE_OR_TARGET_ACCESS_DENIED tells the cause: only that one is reported
+    supersededBy: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+    getFailure: (state) => {
+      const work = state && getConclusiveWork(state);
+      // Not messages.length: errors of the connector with a source do not make a failed work
+      const failure = work && getWorkFailure(work);
+      if (!failure?.failed) {
+        return null;
+      }
+      // The first message is the one of the connector. Not dated: the metadata must stay the same while the failure lasts
+      const message = failure.messages[0];
+      return message ? { error: message.replace(URL_QUERY_STRING, '$1').slice(0, MAX_WORK_ERROR_LENGTH) } : {};
     },
   }),
 } satisfies Record<HealthCheckCode, HealthCheckDefinition>;
