@@ -1,0 +1,105 @@
+// Only the statuses telling that the credentials are refused: a 429 or a 5xx says nothing about access
+export const ACCESS_DENIED_HTTP_STATUSES: readonly number[] = [401, 402, 403];
+
+// Logged by pycti at the end of each run of a connector: the logs between two markers are the logs of one run
+export const RUN_END_MARKER = 'Schedule next run of connector';
+
+// A snapshot of logs older than the expected next run by more than this is stale: the connector may not have run since
+const STALE_SNAPSHOT_TOLERANCE_MS = 10 * 60 * 1000;
+
+export interface AccessDenied {
+  http_status: number;
+  // Never the full URL: an API key may sit in its query string
+  host?: string;
+}
+
+// The error texts of the HTTP clients used by the connectors: requests, httpx, aiohttp
+const ACCESS_DENIED_PATTERNS: RegExp[] = [
+  /\b(\d{3}) (?:Client|Server) Error: .*? for url: (\S+)/,
+  /'(\d{3}) [^']*' for url '([^']+)'/,
+  /\b(\d{3}), message=.*?, url=(?:URL\()?'([^']+)'/,
+];
+
+/**
+ * Reads an HTTP access denied (401, 402, 403) in the text of an error logged by a connector.
+ * The calls of the connector to OpenCTI itself are not an access denied of its source.
+ *
+ * @param text the error text, as logged by the connector
+ * @param platformHost the host of the platform, whose calls are ignored
+ * @returns the status and the host of the source, or null when the text is not an access denied of a source
+ */
+export const parseAccessDenied = (text: string, platformHost?: string): AccessDenied | null => {
+  for (const pattern of ACCESS_DENIED_PATTERNS) {
+    const match = pattern.exec(text);
+    const httpStatus = match ? Number(match[1]) : undefined;
+    if (match && httpStatus !== undefined && ACCESS_DENIED_HTTP_STATUSES.includes(httpStatus)) {
+      try {
+        const url = new URL(match[2]);
+        const isOpenCtiCall = url.host === platformHost || url.pathname.endsWith('/graphql') || url.pathname.startsWith('/storage/');
+        return isOpenCtiCall ? null : { http_status: httpStatus, host: url.host };
+      } catch {
+        return { http_status: httpStatus };
+      }
+    }
+  }
+  return null;
+};
+
+type ComposerLogLine = Record<string, unknown>;
+
+// A line of the composer logs is a JSON object, possibly after a prefix: anything else (traceback, plain text) is dropped
+const parseComposerLogLine = (line: string): ComposerLogLine | null => {
+  const start = line.indexOf('{');
+  if (start === -1) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(line.slice(start));
+    return parsed && typeof parsed === 'object' ? parsed as ComposerLogLine : null;
+  } catch {
+    return null;
+  }
+};
+
+const isAfterOrAt = (timestamp: unknown, date: string) => typeof timestamp === 'string' && new Date(timestamp).getTime() >= new Date(date).getTime();
+
+/**
+ * Looks for an access denied of the source in the logs of a connector, in its last finished run.
+ * The last run is what follows the second-to-last end of run marker: the last marker closes it,
+ * the one before closes the run preceding it.
+ *
+ * @param lines the lines of the composer logs of the connector, oldest first
+ * @param options.platformHost the host of the platform, whose calls are ignored
+ * @param options.nextRunDatetime the date at which the connector was expected to run next
+ * @param options.evaluatedAt the date of the evaluation
+ * @returns the most recent access denied, or null when there is none or the snapshot is too old to tell
+ */
+export const findAccessDeniedInComposerLogs = (
+  lines: string[],
+  options: { platformHost?: string; nextRunDatetime?: string | null; evaluatedAt: string },
+): AccessDenied | null => {
+  const { platformHost, nextRunDatetime, evaluatedAt } = options;
+  const parsedLines = lines.map(parseComposerLogLine).filter((line): line is ComposerLogLine => line !== null);
+  // No line since the expected next run while it is overdue: the snapshot says nothing about the current state
+  if (nextRunDatetime
+    && new Date(evaluatedAt).getTime() > new Date(nextRunDatetime).getTime() + STALE_SNAPSHOT_TOLERANCE_MS
+    && !parsedLines.some((line) => isAfterOrAt(line.timestamp, nextRunDatetime))) {
+    return null;
+  }
+  const markerIndexes = parsedLines.flatMap((line, index) => (line.message === RUN_END_MARKER ? [index] : []));
+  const lastRunStart = markerIndexes.length >= 2 ? markerIndexes[markerIndexes.length - 2] + 1 : 0;
+  const lastRunLines = parsedLines.slice(lastRunStart);
+  // The error may be in any field (message, reason, exc_info...): the most recent line telling an access denied wins
+  for (const line of lastRunLines.reverse()) {
+    if (line.level === 'ERROR') {
+      const texts = Object.values(line).filter((value): value is string => typeof value === 'string');
+      for (const text of texts) {
+        const accessDenied = parseAccessDenied(text, platformHost);
+        if (accessDenied) {
+          return accessDenied;
+        }
+      }
+    }
+  }
+  return null;
+};
