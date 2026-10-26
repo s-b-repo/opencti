@@ -46,6 +46,18 @@ export const parseAccessDenied = (text: string, platformHost?: string): AccessDe
   return null;
 };
 
+/**
+ * The hostname of the platform, from its base url: what parseAccessDenied compares the host of a call to.
+ * Undefined when the base url is not absolute (no base url configured, only a base path).
+ */
+export const getPlatformHost = (baseUrl: string): string | undefined => {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return undefined;
+  }
+};
+
 type ComposerLogLine = Record<string, unknown>;
 
 // A line of the composer logs is a JSON object, possibly after a prefix: anything else (traceback, plain text) is dropped
@@ -76,7 +88,7 @@ const collectStrings = (value: unknown): string[] => {
   return [];
 };
 
-const isAfterOrAt = (timestamp: unknown, date: string) => typeof timestamp === 'string' && new Date(timestamp).getTime() >= new Date(date).getTime();
+const isAfterOrAt = (timestamp: unknown, date: Date | string) => typeof timestamp === 'string' && new Date(timestamp).getTime() >= new Date(date).getTime();
 
 /**
  * Looks for an access denied of the source in the logs of a connector, in its last finished run.
@@ -91,7 +103,7 @@ const isAfterOrAt = (timestamp: unknown, date: string) => typeof timestamp === '
  */
 export const findAccessDeniedInComposerLogs = (
   lines: string[],
-  options: { platformHost?: string; nextRunDatetime?: string | null; evaluatedAt: string },
+  options: { platformHost?: string; nextRunDatetime?: Date | string | null; evaluatedAt: string },
 ): AccessDenied | null => {
   const { platformHost, nextRunDatetime, evaluatedAt } = options;
   const parsedLines = lines.map(parseComposerLogLine).filter((line): line is ComposerLogLine => line !== null);

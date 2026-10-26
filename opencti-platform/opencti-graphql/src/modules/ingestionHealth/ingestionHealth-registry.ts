@@ -7,8 +7,10 @@ import { redisGetConnectorsHeartbeats } from '../connector/connector-redis';
 import { redisGetIngestionLogHistory } from '../../database/redis';
 import { findCapabilityDescription } from '../../database/data-initialization';
 import type { AuthContext, AuthUser } from '../../types/user';
-import { ACCESS_DENIED_HTTP_STATUSES } from './ingestionHealth-accessDenied';
-import { getConclusiveWork, getWorkFailure, loadConnectorsRuntimeState } from './ingestionHealth-connectorWorks';
+import { getBaseUrl } from '../../config/conf';
+import { isNotEmptyField } from '../../database/utils';
+import { ACCESS_DENIED_HTTP_STATUSES, type AccessDenied, findAccessDeniedInComposerLogs, getPlatformHost, parseAccessDenied } from './ingestionHealth-accessDenied';
+import { type ConnectorRuntimeState, getConclusiveWork, getWorkFailure, loadConnectorsRuntimeState } from './ingestionHealth-connectorWorks';
 
 export const HEALTH_CHECK_USER_MISSING = 'USER_MISSING';
 export const HEALTH_CHECK_USER_MISSING_CAPABILITY = 'USER_MISSING_CAPABILITY';
@@ -158,8 +160,37 @@ interface FeedAndSyncExecutionFailure {
   error?: string;
 }
 
-// What SOURCE_OR_TARGET_ACCESS_DENIED reads: the details of the failed execution of a feed or a sync
-export type SourceOrTargetRuntimeData = { kind: 'feed'; details: FeedAndSyncExecutionFailure };
+// What SOURCE_OR_TARGET_ACCESS_DENIED reads: the details of the failed execution of a feed or a sync,
+// or what a managed connector reported (its last work, its composer logs)
+export type SourceOrTargetRuntimeData
+  = | { kind: 'feed'; details: FeedAndSyncExecutionFailure }
+    | { kind: 'connector'; state: ConnectorRuntimeState };
+
+// The calls of a connector to the platform itself are not an access denied of its source: computed once, the configuration does not change
+const PLATFORM_HOST = getPlatformHost(getBaseUrl());
+
+/**
+ * The access denied of a managed connector, from the last run: the conclusive work first, the composer logs otherwise.
+ * A conclusive work is the proof of how the last run went: when it tells no access denied, the logs (which may hold older runs) are not read.
+ * Every connector message is searched, not only the ones of a failed work: pycti may write the exception with the source "CONNECTOR".
+ */
+const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: string): AccessDenied | null => {
+  const work = getConclusiveWork(state);
+  if (work) {
+    for (const message of getWorkFailure(work).messages) {
+      const accessDenied = parseAccessDenied(message, PLATFORM_HOST);
+      if (accessDenied) {
+        return accessDenied;
+      }
+    }
+    return null;
+  }
+  return findAccessDeniedInComposerLogs(state.composer_logs ?? [], {
+    platformHost: PLATFORM_HOST,
+    nextRunDatetime: state.connector_info?.next_run_datetime,
+    evaluatedAt,
+  });
+};
 
 /**
  * Reads the details of the last failed execution of each feed or sync, from its ingestion logs.
@@ -288,7 +319,7 @@ export const HEALTH_CHECK_REGISTRY = {
     },
   }),
   // The source or the target refuses the credentials of the ingestor (HTTP 401, 402, 403): nothing is ingested until they are fixed.
-  // For now a feed or a sync only, read from the same details as FEED_AND_SYNC_EXECUTION_FAILED
+  // A feed or a sync: read from the same details as FEED_AND_SYNC_EXECUTION_FAILED. A managed connector: from its last work, else its composer logs
   [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: defineRuntimeCheck({
     kind: IngestionHealthCheckKind.Runtime,
     label: 'Source or target denied access',
@@ -298,14 +329,28 @@ export const HEALTH_CHECK_REGISTRY = {
       const side = connector_type === 'STREAM' ? 'Target' : 'Source';
       return host ? `${side} denied access: HTTP {http_status} ({host})` : `${side} denied access: HTTP {http_status}`;
     },
-    // Only the failing ones: nothing is read for the others
-    isEnabled: (ingestor) => FEED_AND_SYNC_ENTITY_TYPES.includes(ingestor.entity_type) && ingestor.last_execution_status === 'error',
-    getRuntimeData: async (ingestors) => {
-      const details = await getFeedsAndSyncsLastFailureDetails(ingestors.map((ingestor) => ingestor.internal_id));
-      return new Map(Array.from(details, ([id, failure]): [string, SourceOrTargetRuntimeData] => [id, { kind: 'feed', details: failure }]));
+    // A feed or a sync failing, or a managed connector (only those have composer logs). Nothing is read for the others
+    isEnabled: (ingestor) => (FEED_AND_SYNC_ENTITY_TYPES.includes(ingestor.entity_type) && ingestor.last_execution_status === 'error')
+      || (ingestor.entity_type === ENTITY_TYPE_CONNECTOR && isNotEmptyField(ingestor.catalog_id)),
+    getRuntimeData: async (ingestors, read) => {
+      const connectors = ingestors.filter((ingestor) => ingestor.entity_type === ENTITY_TYPE_CONNECTOR);
+      const feedsAndSyncs = ingestors.filter((ingestor) => ingestor.entity_type !== ENTITY_TYPE_CONNECTOR);
+      const [details, states] = await Promise.all([
+        getFeedsAndSyncsLastFailureDetails(feedsAndSyncs.map((ingestor) => ingestor.internal_id)),
+        connectors.length > 0 ? loadConnectorsRuntimeState(connectors, read, { withComposerLogs: true }) : new Map<string, ConnectorRuntimeState>(),
+      ]);
+      const values = new Map<string, SourceOrTargetRuntimeData>();
+      details.forEach((failure, id) => values.set(id, { kind: 'feed', details: failure }));
+      states.forEach((state, id) => values.set(id, { kind: 'connector', state }));
+      return values;
     },
-    // Only the status: the metadata must stay the same while the failure lasts
-    getFailure: (value) => {
+    getFailure: (value, { evaluatedAt }) => {
+      if (value?.kind === 'connector') {
+        const accessDenied = findConnectorAccessDenied(value.state, evaluatedAt);
+        // Only a state: the metadata must stay the same while the failure lasts
+        return accessDenied ? { ...accessDenied, connector_type: value.state.connector_type } : null;
+      }
+      // Only the status: the metadata must stay the same while the failure lasts
       const httpStatus = value?.details.http_status;
       return httpStatus !== undefined && ACCESS_DENIED_HTTP_STATUSES.includes(httpStatus) ? { http_status: httpStatus } : null;
     },

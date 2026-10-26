@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { findAccessDeniedInComposerLogs, parseAccessDenied, RUN_END_MARKER } from '../../../../src/modules/ingestionHealth/ingestionHealth-accessDenied';
+import { findAccessDeniedInComposerLogs, getPlatformHost, parseAccessDenied, RUN_END_MARKER } from '../../../../src/modules/ingestionHealth/ingestionHealth-accessDenied';
+
+describe('getPlatformHost', () => {
+  it('should give the hostname of an absolute base url, without port nor path', () => {
+    expect(getPlatformHost('https://Platform.example.com:8443/base/path')).toBe('platform.example.com');
+  });
+  it('should give undefined when the base url is relative or empty: no base url configured', () => {
+    expect(getPlatformHost('/base/path')).toBeUndefined();
+    expect(getPlatformHost('')).toBeUndefined();
+  });
+});
 
 describe('parseAccessDenied', () => {
   it('should read a requests HTTPError', () => {
