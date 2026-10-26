@@ -88,24 +88,30 @@ const collectStrings = (value: unknown): string[] => {
   return [];
 };
 
-const isAfterOrAt = (timestamp: unknown, date: Date | string) => typeof timestamp === 'string' && new Date(timestamp).getTime() >= new Date(date).getTime();
+// NaN when the line has no timestamp, or one that is not a date: such a line is never after nor at a date
+const timeOf = (timestamp: unknown) => (typeof timestamp === 'string' ? new Date(timestamp).getTime() : Number.NaN);
+
+const isAfterOrAt = (timestamp: unknown, date: Date | string) => timeOf(timestamp) >= new Date(date).getTime();
 
 /**
  * Looks for an access denied of the source in the logs of a connector, in its last finished run.
- * The last run is what follows the second-to-last end of run marker: the last marker closes it,
+ * The lines are bounded by time: most connectors log at the error level by default, so the end of run marker (INFO) is usually absent.
+ * When markers are there, the last run is also what follows the second-to-last one: the last marker closes it,
  * the one before closes the run preceding it.
+ * A line without a date is ignored: its age cannot be judged.
  *
  * @param lines the lines of the composer logs of the connector, oldest first
  * @param options.platformHost the host of the platform, whose calls are ignored
  * @param options.nextRunDatetime the date at which the connector was expected to run next
  * @param options.evaluatedAt the date of the evaluation
+ * @param options.notBefore the lines logged at or before it are ignored. Null or absent: every dated line is read
  * @returns the most recent access denied, or null when there is none or the snapshot is too old to tell
  */
 export const findAccessDeniedInComposerLogs = (
   lines: string[],
-  options: { platformHost?: string; nextRunDatetime?: Date | string | null; evaluatedAt: string },
+  options: { platformHost?: string; nextRunDatetime?: Date | string | null; evaluatedAt: string; notBefore?: Date | string | null },
 ): AccessDenied | null => {
-  const { platformHost, nextRunDatetime, evaluatedAt } = options;
+  const { platformHost, nextRunDatetime, evaluatedAt, notBefore } = options;
   const parsedLines = lines.map(parseComposerLogLine).filter((line): line is ComposerLogLine => line !== null);
   // No line since the expected next run while it is overdue: the snapshot says nothing about the current state
   if (nextRunDatetime
@@ -116,9 +122,10 @@ export const findAccessDeniedInComposerLogs = (
   const markerIndexes = parsedLines.flatMap((line, index) => (line.message === RUN_END_MARKER ? [index] : []));
   const lastRunStart = markerIndexes.length >= 2 ? markerIndexes[markerIndexes.length - 2] + 1 : 0;
   const lastRunLines = parsedLines.slice(lastRunStart);
+  const notBeforeTime = notBefore ? new Date(notBefore).getTime() : Number.NEGATIVE_INFINITY;
   // The error may be in any field (message, reason, exc_info...): the most recent line telling an access denied wins
   for (const line of lastRunLines.reverse()) {
-    if (line.level === 'ERROR') {
+    if (line.level === 'ERROR' && timeOf(line.timestamp) > notBeforeTime) {
       for (const text of collectStrings(line)) {
         const accessDenied = parseAccessDenied(text, platformHost);
         if (accessDenied) {

@@ -542,6 +542,24 @@ describe('source or target access denied check: managed connectors', () => {
     expect(evaluate(MANAGED, state)).toEqual(accessDenied(DENIED));
   });
 
+  it('should ignore the lines of the logs logged before the last processed work: a finished run judged the access then', () => {
+    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [] };
+    const olderLine = JSON.stringify({ timestamp: '2026-10-13T10:59:00Z', level: 'ERROR', message: DENIED_MESSAGE });
+    const state = connectorState({ last_work: work, connector_info: { last_run_datetime: '2026-10-13T11:30:00Z' }, composer_logs: [olderLine] });
+    expect(evaluate(MANAGED, state)).toEqual([]);
+  });
+
+  it('should only read the errors of the last 30 minutes of a stream: a revoked token repeats on every event', () => {
+    const STREAM = { ...MANAGED, connector_type: 'STREAM' };
+    const streamState = (timestamp: string) => connectorState({
+      connector_type: 'STREAM',
+      composer_logs: [JSON.stringify({ timestamp, level: 'ERROR', message: DENIED_MESSAGE })],
+    });
+    // Evaluated at 12:00
+    expect(evaluate(STREAM, streamState('2026-10-13T11:29:59Z'))).toEqual([]);
+    expect(evaluate(STREAM, streamState('2026-10-13T11:45:00Z'))).toEqual(accessDenied({ ...DENIED, connector_type: 'STREAM' }));
+  });
+
   it('should fall back to the logs when every work was purged', () => {
     expect(evaluate(MANAGED, connectorState({ composer_logs: [DENIED_LINE] }))).toEqual(accessDenied(DENIED));
   });
@@ -557,7 +575,7 @@ describe('source or target access denied check: managed connectors', () => {
   });
 
   it('should not retain a status other than 401, 402, 403 in the logs', () => {
-    const line = JSON.stringify({ level: 'ERROR', message: '429 Client Error: Too Many Requests for url: https://api.example.com/x' });
+    const line = JSON.stringify({ timestamp: '2026-10-13T11:00:01Z', level: 'ERROR', message: '429 Client Error: Too Many Requests for url: https://api.example.com/x' });
     expect(evaluate(MANAGED, connectorState({ composer_logs: [line] }))).toEqual([]);
   });
 
@@ -570,7 +588,7 @@ describe('source or target access denied check: managed connectors', () => {
   const PLATFORM_CALL = '401 Client Error: Unauthorized for url: https://platform.example.com/api/x';
 
   it('should ignore a call to the platform itself in the logs', () => {
-    const line = JSON.stringify({ level: 'ERROR', message: PLATFORM_CALL });
+    const line = JSON.stringify({ timestamp: '2026-10-13T11:00:01Z', level: 'ERROR', message: PLATFORM_CALL });
     expect(evaluate(MANAGED, connectorState({ composer_logs: [line] }))).toEqual([]);
   });
 

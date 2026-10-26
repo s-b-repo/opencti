@@ -91,6 +91,26 @@ describe('findAccessDeniedInComposerLogs', () => {
     const lines = [DENIED('2026-10-26T08:00:01Z'), MARKER('2026-10-26T08:00:02Z')];
     expect(findAccessDeniedInComposerLogs(lines, { evaluatedAt: '2026-10-26T09:05:00.000Z', nextRunDatetime: '2026-10-26T09:00:00Z' })).not.toBeNull();
   });
+  // The default log level of most connectors is error: the INFO marker is usually absent, only the time bounds the lines
+  it('should only read the lines after notBefore, without any marker', () => {
+    const notBefore = '2026-10-26T10:30:00Z';
+    expect(findAccessDeniedInComposerLogs([DENIED('2026-10-26T10:00:00Z')], { evaluatedAt: EVALUATED_AT, notBefore })).toBeNull();
+    expect(findAccessDeniedInComposerLogs([DENIED('2026-10-26T11:00:00Z')], { evaluatedAt: EVALUATED_AT, notBefore })).toEqual({ http_status: 401, host: 'api.example.com' });
+  });
+  it('should ignore a line logged at notBefore exactly', () => {
+    expect(findAccessDeniedInComposerLogs([DENIED('2026-10-26T10:30:00Z')], { evaluatedAt: EVALUATED_AT, notBefore: new Date('2026-10-26T10:30:00Z') })).toBeNull();
+  });
+  it('should read every dated line when notBefore is null: no processed work', () => {
+    expect(findAccessDeniedInComposerLogs([DENIED('2026-10-20T10:00:00Z')], { evaluatedAt: EVALUATED_AT, notBefore: null })).not.toBeNull();
+  });
+  it('should ignore a line without timestamp, or with one that is not a date: its age cannot be judged', () => {
+    const undated = JSON.stringify({ level: 'ERROR', message: '401 Client Error: Unauthorized for url: https://api.example.com/x' });
+    const misdated = line('yesterday', 'ERROR', '401 Client Error: Unauthorized for url: https://api.example.com/x');
+    expect(findAccessDeniedInComposerLogs([undated, misdated], { evaluatedAt: EVALUATED_AT })).toBeNull();
+  });
+  it('should read the timestamp of pycti, with microseconds', () => {
+    expect(findAccessDeniedInComposerLogs([DENIED('2026-10-26T11:00:01.123456Z')], { evaluatedAt: EVALUATED_AT, notBefore: '2026-10-26T11:00:00Z' })).not.toBeNull();
+  });
   it('should return the most recent denial, skipping the calls to OpenCTI itself', () => {
     const own = line('2026-10-26T11:00:03Z', 'ERROR', 'x', { reason: '403 Client Error: Forbidden for url: https://cti.acme.com/api' });
     const lines = [DENIED('2026-10-26T11:00:01Z'), own];

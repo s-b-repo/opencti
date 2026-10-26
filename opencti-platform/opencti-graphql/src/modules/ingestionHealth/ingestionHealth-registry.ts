@@ -174,10 +174,22 @@ const getCachedPlatformHost = () => {
   return platformHost.value;
 };
 
+// A stream has no run: its errors are judged over a sliding window. A revoked token repeats on every event, a transient denial ages out
+const STREAM_ERROR_WINDOW_MS = 30 * 60 * 1000;
+
+// The oldest log line that may still tell the access: the last processed work proves the access was judged when it ended
+const getComposerLogsNotBefore = (state: ConnectorRuntimeState, evaluatedAt: string): Date | string | null => {
+  if (state.connector_type === 'STREAM') {
+    return new Date(new Date(evaluatedAt).getTime() - STREAM_ERROR_WINDOW_MS);
+  }
+  return state.last_work?.processed_time ?? null;
+};
+
 /**
  * The access denied of a managed connector, from the last run: the conclusive work first, the composer logs otherwise.
  * A conclusive work is the proof of how the last run went: when it tells no access denied, the logs (which may hold older runs) are not read.
  * Every connector message is searched, not only the ones of a failed work: pycti may write the exception with the source "CONNECTOR".
+ * The logs are bounded by time: after the last processed work, or over the last 30 minutes for a stream.
  */
 const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: string): AccessDenied | null => {
   const work = getConclusiveWork(state);
@@ -194,6 +206,7 @@ const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: st
     platformHost: getCachedPlatformHost(),
     nextRunDatetime: state.connector_info?.next_run_datetime,
     evaluatedAt,
+    notBefore: getComposerLogsNotBefore(state, evaluatedAt),
   });
 };
 
