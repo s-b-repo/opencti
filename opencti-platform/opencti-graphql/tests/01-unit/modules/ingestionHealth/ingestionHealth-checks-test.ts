@@ -570,9 +570,17 @@ describe('source or target access denied check: managed connectors', () => {
     expect(evaluate(MANAGED, state)).toEqual(accessDenied({ ...DENIED, connector_type: 'INTERNAL_ENRICHMENT' }));
   });
 
+  // A path no other rule of parseAccessDenied covers (/graphql, /storage/): only the host of the platform tells it
+  const PLATFORM_CALL = '401 Client Error: Unauthorized for url: https://platform.example.com/api/x';
+
   it('should ignore a call to the platform itself in the logs', () => {
-    const line = JSON.stringify({ level: 'ERROR', message: '401 Client Error: Unauthorized for url: https://platform.example.com/graphql' });
+    const line = JSON.stringify({ level: 'ERROR', message: PLATFORM_CALL });
     expect(evaluate(MANAGED, connectorState({ composer_logs: [line] }))).toEqual([]);
+  });
+
+  it('should ignore a call to the platform itself in the conclusive work', () => {
+    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: PLATFORM_CALL, source: null }] };
+    expect(evaluate(MANAGED, connectorState({ last_work: work }))).toEqual([]);
   });
 
   it('should give a critical status', () => {

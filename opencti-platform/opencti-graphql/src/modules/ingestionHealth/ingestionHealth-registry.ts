@@ -166,8 +166,13 @@ export type SourceOrTargetRuntimeData
   = | { kind: 'feed'; details: FeedAndSyncExecutionFailure }
     | { kind: 'connector'; state: ConnectorRuntimeState };
 
-// The calls of a connector to the platform itself are not an access denied of its source: computed once, the configuration does not change
-const PLATFORM_HOST = getPlatformHost(getBaseUrl());
+// The calls of a connector to the platform itself are not an access denied of its source.
+// Computed on first use, not at import (the configuration does not change), then kept
+let platformHost: { value: string | undefined } | undefined;
+const getCachedPlatformHost = () => {
+  platformHost ??= { value: getPlatformHost(getBaseUrl()) };
+  return platformHost.value;
+};
 
 /**
  * The access denied of a managed connector, from the last run: the conclusive work first, the composer logs otherwise.
@@ -178,7 +183,7 @@ const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: st
   const work = getConclusiveWork(state);
   if (work) {
     for (const message of getWorkFailure(work).messages) {
-      const accessDenied = parseAccessDenied(message, PLATFORM_HOST);
+      const accessDenied = parseAccessDenied(message, getCachedPlatformHost());
       if (accessDenied) {
         return accessDenied;
       }
@@ -186,7 +191,7 @@ const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: st
     return null;
   }
   return findAccessDeniedInComposerLogs(state.composer_logs ?? [], {
-    platformHost: PLATFORM_HOST,
+    platformHost: getCachedPlatformHost(),
     nextRunDatetime: state.connector_info?.next_run_datetime,
     evaluatedAt,
   });
