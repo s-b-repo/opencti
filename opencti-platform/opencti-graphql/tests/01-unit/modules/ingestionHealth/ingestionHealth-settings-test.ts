@@ -8,10 +8,10 @@ import {
   validateIngestionHealthSettingsInput,
 } from '../../../../src/modules/ingestionHealth/ingestionHealth-settings';
 import {
-  HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED,
   HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED,
   HEALTH_CHECK_HEARTBEAT_MISSING,
-  HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+  HEALTH_CHECK_LAST_RUN_FAILED,
+  HEALTH_CHECK_SOURCE_ACCESS_DENIED,
   HEALTH_CHECK_USER_MISSING,
   HEALTH_CHECK_USER_MISSING_CAPABILITY,
   HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT,
@@ -76,8 +76,8 @@ describe('toGraphqlIngestionHealthSettings', () => {
         enabledCheck(HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT, 'User is not a service account', IngestionHealthCheckKind.Configuration),
         enabledCheck(HEALTH_CHECK_HEARTBEAT_MISSING, 'No heartbeat received', IngestionHealthCheckKind.Runtime),
         enabledCheck(HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, 'Feed or sync execution failed', IngestionHealthCheckKind.Runtime),
-        enabledCheck(HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, 'Source or target denied access', IngestionHealthCheckKind.Runtime),
-        enabledCheck(HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED, 'Last work failed', IngestionHealthCheckKind.Runtime),
+        enabledCheck(HEALTH_CHECK_SOURCE_ACCESS_DENIED, 'Source denied access', IngestionHealthCheckKind.Runtime),
+        enabledCheck(HEALTH_CHECK_LAST_RUN_FAILED, 'Last run failed', IngestionHealthCheckKind.Runtime),
       ],
     });
   });
@@ -91,8 +91,8 @@ describe('toGraphqlIngestionHealthSettings', () => {
       [HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT]: true,
       [HEALTH_CHECK_HEARTBEAT_MISSING]: false,
       [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]: true,
-      [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: true,
-      [HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]: true,
+      [HEALTH_CHECK_SOURCE_ACCESS_DENIED]: true,
+      [HEALTH_CHECK_LAST_RUN_FAILED]: true,
     });
   });
 });
@@ -151,7 +151,7 @@ describe('validateIngestionHealthSettingsInput', () => {
     ['absent', undefined],
     ['empty', []],
     ['one check', [HEALTH_CHECK_HEARTBEAT_MISSING]],
-    ['every check', [HEALTH_CHECK_USER_MISSING, HEALTH_CHECK_USER_MISSING_CAPABILITY, HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT, HEALTH_CHECK_HEARTBEAT_MISSING, HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]],
+    ['every check', [HEALTH_CHECK_USER_MISSING, HEALTH_CHECK_USER_MISSING_CAPABILITY, HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT, HEALTH_CHECK_HEARTBEAT_MISSING, HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, HEALTH_CHECK_SOURCE_ACCESS_DENIED, HEALTH_CHECK_LAST_RUN_FAILED]],
   ])('should accept disabled checks %s', async (_, disabled) => {
     await expect(validate(input({ notification_delay: 0, disabled_health_checks: disabled }))).resolves.toBeUndefined();
   });

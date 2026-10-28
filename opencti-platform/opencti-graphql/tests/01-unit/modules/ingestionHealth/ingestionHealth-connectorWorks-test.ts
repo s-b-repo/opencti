@@ -4,7 +4,6 @@ import type { BasicStoreEntityConnector, ConnectorInfo } from '../../../../src/m
 import type { RuntimeDataReadContext } from '../../../../src/modules/ingestionHealth/ingestionHealth-registry';
 import { fullEntitiesList } from '../../../../src/database/middleware-loader';
 import { worksForConnector } from '../../../../src/domain/work';
-import { redisGetConnectorLogs } from '../../../../src/modules/connector/connector-redis';
 import { addFilter } from '../../../../src/utils/filtering/filtering-utils';
 import { FilterOperator } from '../../../../src/generated/graphql';
 
@@ -20,10 +19,6 @@ vi.mock('../../../../src/domain/work', async (importActual) => ({
 vi.mock('../../../../src/database/engine', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/database/engine')>()),
   ES_MAX_CONCURRENCY: 2,
-}));
-vi.mock('../../../../src/modules/connector/connector-redis', async (importActual) => ({
-  ...(await importActual<typeof import('../../../../src/modules/connector/connector-redis')>()),
-  redisGetConnectorLogs: vi.fn(),
 }));
 
 const RUN_END = '2026-10-26T11:00:00.000Z';
@@ -45,7 +40,6 @@ describe('loadConnectorsRuntimeState', () => {
 
   beforeEach(() => {
     vi.mocked(worksForConnector).mockReset();
-    vi.mocked(redisGetConnectorLogs).mockReset();
   });
 
   it('should read the most recent processed work of every type but STREAM, EXTERNAL_IMPORT included: an open work says nothing', async () => {
@@ -53,18 +47,16 @@ describe('loadConnectorsRuntimeState', () => {
     // work.js is untyped: the hits are typed as store elements
     vi.mocked(worksForConnector).mockResolvedValue([work] as never);
     const ingestors = connectorsOfTypes({ import: 'EXTERNAL_IMPORT', enrichment: 'INTERNAL_ENRICHMENT' });
-    const states = await loadConnectorsRuntimeState(ingestors, READ, { withComposerLogs: false });
+    const states = await loadConnectorsRuntimeState(ingestors, READ);
     expect(worksForConnector).toHaveBeenCalledWith(READ.context, READ.user, 'import', { first: 1, filters: PROCESSED_ONLY });
     expect(worksForConnector).toHaveBeenCalledWith(READ.context, READ.user, 'enrichment', { first: 1, filters: PROCESSED_ONLY });
     expect(states.get('import')?.last_work).toBe(work);
-    expect(redisGetConnectorLogs).not.toHaveBeenCalled();
   });
 
-  it('should not read the works of a STREAM connector, which has none: only its composer logs', async () => {
-    vi.mocked(redisGetConnectorLogs).mockResolvedValue(['line']);
-    const states = await loadConnectorsRuntimeState(connectorsOfTypes({ stream: 'STREAM' }), READ, { withComposerLogs: true });
+  it('should not read the works of a STREAM connector, which has none', async () => {
+    const states = await loadConnectorsRuntimeState(connectorsOfTypes({ stream: 'STREAM' }), READ);
     expect(worksForConnector).not.toHaveBeenCalled();
-    expect(states.get('stream')).toEqual({ connector_type: 'STREAM', connector_info: null, last_work: undefined, composer_logs: ['line'] });
+    expect(states.get('stream')).toEqual({ connector_type: 'STREAM', connector_info: null, last_work: undefined });
   });
 
   it('should read at most ES_MAX_CONCURRENCY connectors at once', async () => {
@@ -79,14 +71,14 @@ describe('loadConnectorsRuntimeState', () => {
       running -= 1;
       return [];
     });
-    const states = await loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT', c2: 'EXTERNAL_IMPORT', c3: 'EXTERNAL_IMPORT', c4: 'EXTERNAL_IMPORT', c5: 'EXTERNAL_IMPORT' }), READ, { withComposerLogs: false });
+    const states = await loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT', c2: 'EXTERNAL_IMPORT', c3: 'EXTERNAL_IMPORT', c4: 'EXTERNAL_IMPORT', c5: 'EXTERNAL_IMPORT' }), READ);
     expect(states.size).toBe(5);
     expect(maxRunning).toBe(2);
   });
 
   it('should reject when a read fails: a failure must not be read as a missing value', async () => {
     vi.mocked(worksForConnector).mockRejectedValue(new Error('elastic unavailable'));
-    await expect(loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT' }), READ, { withComposerLogs: false })).rejects.toThrow('elastic unavailable');
+    await expect(loadConnectorsRuntimeState(connectorsOfTypes({ c1: 'EXTERNAL_IMPORT' }), READ)).rejects.toThrow('elastic unavailable');
   });
 });
 

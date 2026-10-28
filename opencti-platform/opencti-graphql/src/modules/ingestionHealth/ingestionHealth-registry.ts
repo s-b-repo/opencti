@@ -7,18 +7,15 @@ import { redisGetConnectorsHeartbeats } from '../connector/connector-redis';
 import { redisGetIngestionLogHistory } from '../../database/redis';
 import { findCapabilityDescription } from '../../database/data-initialization';
 import type { AuthContext, AuthUser } from '../../types/user';
-import { getBaseUrl } from '../../config/conf';
-import { isNotEmptyField } from '../../database/utils';
-import { ACCESS_DENIED_HTTP_STATUSES, type AccessDenied, findAccessDeniedInComposerLogs, getPlatformHost, parseAccessDenied } from './ingestionHealth-accessDenied';
-import { type ConnectorRuntimeState, getConclusiveWork, getWorkFailure, loadConnectorsRuntimeState } from './ingestionHealth-connectorWorks';
+import { getConclusiveWork, getWorkFailure, loadConnectorsRuntimeState } from './ingestionHealth-connectorWorks';
 
 export const HEALTH_CHECK_USER_MISSING = 'USER_MISSING';
 export const HEALTH_CHECK_USER_MISSING_CAPABILITY = 'USER_MISSING_CAPABILITY';
 export const HEALTH_CHECK_HEARTBEAT_MISSING = 'HEARTBEAT_MISSING';
 export const HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT = 'USER_NOT_SERVICE_ACCOUNT';
 export const HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED = 'FEED_AND_SYNC_EXECUTION_FAILED';
-export const HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED = 'SOURCE_OR_TARGET_ACCESS_DENIED';
-export const HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED = 'CONNECTOR_LAST_WORK_FAILED';
+export const HEALTH_CHECK_SOURCE_ACCESS_DENIED = 'SOURCE_ACCESS_DENIED';
+export const HEALTH_CHECK_LAST_RUN_FAILED = 'LAST_RUN_FAILED';
 
 // Every check of the registry: adding a check adds its code here
 export type HealthCheckCode = typeof HEALTH_CHECK_USER_MISSING
@@ -26,8 +23,8 @@ export type HealthCheckCode = typeof HEALTH_CHECK_USER_MISSING
   | typeof HEALTH_CHECK_HEARTBEAT_MISSING
   | typeof HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT
   | typeof HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED
-  | typeof HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED
-  | typeof HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED;
+  | typeof HEALTH_CHECK_SOURCE_ACCESS_DENIED
+  | typeof HEALTH_CHECK_LAST_RUN_FAILED;
 
 // The values read by the runtime checks for one ingestion, by check code.
 // Inferred from the registry: the type of each value is the one returned by the getRuntimeData of its check
@@ -47,10 +44,7 @@ export interface HealthCheckIngestor {
   user_id?: string | null;
   // The outcome of the last execution of a feed or a sync, patched by the ingestion manager or the sync manager
   last_execution_status?: string | null;
-  // The kind of a connector (EXTERNAL_IMPORT, STREAM...): tells a source from a target
   connector_type?: string | null;
-  // The catalog entry of a managed connector: absent for a connector deployed by hand
-  catalog_id?: string | null;
 }
 
 // Computed once at the beginning of each period of the ingestion health manager, shared by the evaluation of every ingestion.
@@ -160,55 +154,8 @@ interface FeedAndSyncExecutionFailure {
   error?: string;
 }
 
-// What SOURCE_OR_TARGET_ACCESS_DENIED reads: the details of the failed execution of a feed or a sync,
-// or what a managed connector reported (its last work, its composer logs)
-export type SourceOrTargetRuntimeData
-  = | { kind: 'feed'; details: FeedAndSyncExecutionFailure }
-    | { kind: 'connector'; state: ConnectorRuntimeState };
-
-// The calls of a connector to the platform itself are not an access denied of its source.
-// Computed on first use, not at import (the configuration does not change), then kept
-let platformHost: { value: string | undefined } | undefined;
-const getCachedPlatformHost = () => {
-  platformHost ??= { value: getPlatformHost(getBaseUrl()) };
-  return platformHost.value;
-};
-
-// A stream has no run: its errors are judged over a sliding window. A revoked token repeats on every event, a transient denial ages out
-const STREAM_ERROR_WINDOW_MS = 30 * 60 * 1000;
-
-// The oldest log line that may still tell the access: the last processed work proves the access was judged when it ended
-const getComposerLogsNotBefore = (state: ConnectorRuntimeState, evaluatedAt: string): Date | string | null => {
-  if (state.connector_type === 'STREAM') {
-    return new Date(new Date(evaluatedAt).getTime() - STREAM_ERROR_WINDOW_MS);
-  }
-  return state.last_work?.processed_time ?? null;
-};
-
-/**
- * The access denied of a managed connector, from the last run: the conclusive work first, the composer logs otherwise.
- * A conclusive work is the proof of how the last run went: when it tells no access denied, the logs (which may hold older runs) are not read.
- * Every connector message is searched, not only the ones of a failed work: pycti may write the exception with the source "CONNECTOR".
- * The logs are bounded by time: after the last processed work, or over the last 30 minutes for a stream.
- */
-const findConnectorAccessDenied = (state: ConnectorRuntimeState, evaluatedAt: string): AccessDenied | null => {
-  const work = getConclusiveWork(state);
-  if (work) {
-    for (const message of getWorkFailure(work).messages) {
-      const accessDenied = parseAccessDenied(message, getCachedPlatformHost());
-      if (accessDenied) {
-        return accessDenied;
-      }
-    }
-    return null;
-  }
-  return findAccessDeniedInComposerLogs(state.composer_logs ?? [], {
-    platformHost: getCachedPlatformHost(),
-    nextRunDatetime: state.connector_info?.next_run_datetime,
-    evaluatedAt,
-    notBefore: getComposerLogsNotBefore(state, evaluatedAt),
-  });
-};
+// Only the statuses telling that the credentials are refused: a 429 or a 5xx says nothing about access
+const ACCESS_DENIED_HTTP_STATUSES: readonly number[] = [401, 402, 403];
 
 /**
  * Reads the details of the last failed execution of each feed or sync, from its ingestion logs.
@@ -337,8 +284,8 @@ export const HEALTH_CHECK_REGISTRY = {
     // Only the failing ones: nothing is read for the others
     isEnabled: (ingestor) => FEED_AND_SYNC_ENTITY_TYPES.includes(ingestor.entity_type) && ingestor.last_execution_status === 'error',
     getRuntimeData: (ingestors) => getFeedsAndSyncsLastFailureDetails(ingestors.map((ingestor) => ingestor.internal_id)),
-    // When the access was denied, SOURCE_OR_TARGET_ACCESS_DENIED tells the cause: only that one is reported
-    supersededBy: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+    // When the access was denied, SOURCE_ACCESS_DENIED tells the cause: only that one is reported
+    supersededBy: HEALTH_CHECK_SOURCE_ACCESS_DENIED,
     // The details are not always known: the failure is reported without them. They are not dated: the metadata must stay the same while the failure lasts.
     // Their description fills the message: stored with them, it is the same for the same details
     getFailure: (details) => {
@@ -346,55 +293,32 @@ export const HEALTH_CHECK_REGISTRY = {
       return { ...details, ...(failureDescription ? { failure_description: failureDescription } : {}) };
     },
   }),
-  // The source or the target refuses the credentials of the ingestor (HTTP 401, 402, 403): nothing is ingested until they are fixed.
-  // A feed or a sync: read from the same details as FEED_AND_SYNC_EXECUTION_FAILED. A managed connector: from its last work, else its composer logs
-  [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: defineRuntimeCheck({
+  // The source refuses the credentials of the feed or the sync (HTTP 401, 402, 403): nothing is ingested until they are fixed.
+  // Read from the same details as FEED_AND_SYNC_EXECUTION_FAILED
+  [HEALTH_CHECK_SOURCE_ACCESS_DENIED]: defineRuntimeCheck({
     kind: IngestionHealthCheckKind.Runtime,
-    label: 'Source or target denied access',
+    label: 'Source denied access',
     severity: IngestionHealthCheckSeverity.Blocking,
-    // The side is substituted here, not by a placeholder: the front translates four fixed messages
-    message: ({ connector_type, host }) => {
-      const side = connector_type === 'STREAM' ? 'Target' : 'Source';
-      return host ? `${side} denied access: HTTP {http_status} ({host})` : `${side} denied access: HTTP {http_status}`;
-    },
-    // A feed or a sync failing, or a managed connector (only those have composer logs). Nothing is read for the others
-    isEnabled: (ingestor) => (FEED_AND_SYNC_ENTITY_TYPES.includes(ingestor.entity_type) && ingestor.last_execution_status === 'error')
-      || (ingestor.entity_type === ENTITY_TYPE_CONNECTOR && isNotEmptyField(ingestor.catalog_id)),
-    getRuntimeData: async (ingestors, read) => {
-      const connectors = ingestors.filter((ingestor) => ingestor.entity_type === ENTITY_TYPE_CONNECTOR);
-      const feedsAndSyncs = ingestors.filter((ingestor) => ingestor.entity_type !== ENTITY_TYPE_CONNECTOR);
-      const [details, states] = await Promise.all([
-        getFeedsAndSyncsLastFailureDetails(feedsAndSyncs.map((ingestor) => ingestor.internal_id)),
-        connectors.length > 0 ? loadConnectorsRuntimeState(connectors, read, { withComposerLogs: true }) : new Map<string, ConnectorRuntimeState>(),
-      ]);
-      const values = new Map<string, SourceOrTargetRuntimeData>();
-      details.forEach((failure, id) => values.set(id, { kind: 'feed', details: failure }));
-      states.forEach((state, id) => values.set(id, { kind: 'connector', state }));
-      return values;
-    },
-    getFailure: (value, { evaluatedAt }) => {
-      if (value?.kind === 'connector') {
-        const accessDenied = findConnectorAccessDenied(value.state, evaluatedAt);
-        // Only a state: the metadata must stay the same while the failure lasts
-        return accessDenied ? { ...accessDenied, connector_type: value.state.connector_type } : null;
-      }
-      // Only the status: the metadata must stay the same while the failure lasts
-      const httpStatus = value?.details.http_status;
+    message: () => 'Source denied access: HTTP {http_status}',
+    // Only the failing ones: nothing is read for the others
+    isEnabled: (ingestor) => FEED_AND_SYNC_ENTITY_TYPES.includes(ingestor.entity_type) && ingestor.last_execution_status === 'error',
+    getRuntimeData: (ingestors) => getFeedsAndSyncsLastFailureDetails(ingestors.map((ingestor) => ingestor.internal_id)),
+    // Only the status: the metadata must stay the same while the failure lasts
+    getFailure: (details) => {
+      const httpStatus = details?.http_status;
       return httpStatus !== undefined && ACCESS_DENIED_HTTP_STATUSES.includes(httpStatus) ? { http_status: httpStatus } : null;
     },
   }),
   // The last run of the connector ended with an error. Advisory: the connector may still ingest, and the next successful run clears it.
   // Another work of the connector may have succeeded since: only the last conclusive one is judged
-  [HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]: defineRuntimeCheck({
+  [HEALTH_CHECK_LAST_RUN_FAILED]: defineRuntimeCheck({
     kind: IngestionHealthCheckKind.Runtime,
-    label: 'Last work failed',
+    label: 'Last run failed',
     severity: IngestionHealthCheckSeverity.Advisory,
-    message: ({ error }) => (error ? 'Last work failed: {error}' : 'Last work failed'),
-    // A stream has no work. Managed or not: the work is reported by the connector itself
+    message: ({ error }) => (error ? 'Last run failed: {error}' : 'Last run failed'),
+    // A stream has no run. Managed or not: the work is reported by the connector itself
     isEnabled: (ingestor) => ingestor.entity_type === ENTITY_TYPE_CONNECTOR && ingestor.connector_type !== 'STREAM',
-    getRuntimeData: (ingestors, read) => loadConnectorsRuntimeState(ingestors, read, { withComposerLogs: false }),
-    // When the access was denied, SOURCE_OR_TARGET_ACCESS_DENIED tells the cause: only that one is reported
-    supersededBy: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+    getRuntimeData: (ingestors, read) => loadConnectorsRuntimeState(ingestors, read),
     getFailure: (state) => {
       const work = state && getConclusiveWork(state);
       // Not messages.length: errors of the connector with a source do not make a failed work

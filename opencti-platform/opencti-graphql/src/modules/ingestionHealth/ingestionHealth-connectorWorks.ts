@@ -5,7 +5,6 @@ import { fullEntitiesList } from '../../database/middleware-loader';
 import { ES_MAX_CONCURRENCY } from '../../database/engine';
 import { worksForConnector } from '../../domain/work';
 import { addFilter } from '../../utils/filtering/filtering-utils';
-import { redisGetConnectorLogs } from '../connector/connector-redis';
 import type { BasicStoreEntityConnector, ConnectorInfo } from '../connector/connector-types';
 import type { HealthCheckIngestor, RuntimeDataReadContext } from './ingestionHealth-registry';
 
@@ -33,12 +32,10 @@ export interface ConnectorRuntimeState {
   connector_info?: ConnectorInfo | null;
   // The most recent processed work: absent for a stream, and when purged or never run
   last_work?: ConnectorWork;
-  // Only read when asked
-  composer_logs?: string[];
 }
 
 /**
- * Reads, for the connectors of the ingestors, what the runtime checks judge: connector_info, last work, composer logs.
+ * Reads, for the connectors of the ingestors, what the runtime checks judge: connector_info, last work.
  * A read failure rejects: it must not be read as a missing value (registry contract).
  * The connectors are read ES_MAX_CONCURRENCY at a time: a platform may have hundreds.
  *
@@ -52,7 +49,6 @@ export interface ConnectorRuntimeState {
 export const loadConnectorsRuntimeState = async (
   ingestors: HealthCheckIngestor[],
   read: RuntimeDataReadContext,
-  options: { withComposerLogs: boolean },
 ): Promise<Map<string, ConnectorRuntimeState>> => {
   const states = new Map<string, ConnectorRuntimeState>();
   if (ingestors.length === 0) {
@@ -66,18 +62,14 @@ export const loadConnectorsRuntimeState = async (
   });
   const processedOnly = addFilter(null, 'processed_time', [], FilterOperator.NotNil);
   await BluePromise.map(connectors, async (connector) => {
-    const [works, composerLogs] = await Promise.all([
-      connector.connector_type === CONNECTOR_TYPE_STREAM
-        ? []
-        // work.js is untyped: elPaginate without connectionFormat returns the hits
-        : worksForConnector(context, user, connector.internal_id, { first: 1, filters: processedOnly }) as unknown as Promise<ConnectorWork[]>,
-      options.withComposerLogs ? redisGetConnectorLogs(connector.internal_id) : undefined,
-    ]);
+    const works = connector.connector_type === CONNECTOR_TYPE_STREAM
+      ? []
+      // work.js is untyped: elPaginate without connectionFormat returns the hits
+      : await worksForConnector(context, user, connector.internal_id, { first: 1, filters: processedOnly }) as unknown as ConnectorWork[];
     states.set(connector.internal_id, {
       connector_type: connector.connector_type,
       connector_info: connector.connector_info,
       last_work: works[0],
-      ...(composerLogs ? { composer_logs: composerLogs } : {}),
     });
   }, { concurrency: ES_MAX_CONCURRENCY });
   return states;

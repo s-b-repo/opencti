@@ -14,11 +14,11 @@ import {
   toGraphqlIngestionHealth,
 } from '../../../../src/modules/ingestionHealth/ingestionHealth-checks';
 import {
-  HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED,
   HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED,
   HEALTH_CHECK_HEARTBEAT_MISSING,
+  HEALTH_CHECK_LAST_RUN_FAILED,
   HEALTH_CHECK_REGISTRY,
-  HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED,
+  HEALTH_CHECK_SOURCE_ACCESS_DENIED,
   HEALTH_CHECK_USER_MISSING,
   HEALTH_CHECK_USER_MISSING_CAPABILITY,
   HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT,
@@ -36,10 +36,6 @@ import { HealthTransition, type IngestionHealthFields, type StoredHealthCheck, t
 vi.mock('../../../../src/database/redis', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/database/redis')>()),
   redisGetIngestionLogHistory: vi.fn(),
-}));
-vi.mock('../../../../src/config/conf', async (importActual) => ({
-  ...(await importActual<typeof import('../../../../src/config/conf')>()),
-  getBaseUrl: () => 'https://platform.example.com/',
 }));
 vi.mock('../../../../src/modules/ingestionHealth/ingestionHealth-connectorWorks', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/modules/ingestionHealth/ingestionHealth-connectorWorks')>()),
@@ -401,23 +397,23 @@ describe('execution failed check details', () => {
   });
 });
 
-describe('source or target access denied check: feeds and syncs', () => {
+describe('source access denied check', () => {
   const FAILED_FEED = { ...FEED, last_execution_status: 'error' };
   const FAILED_SYNC = { ...SYNC, last_execution_status: 'error' };
   const runtime = (details: object) => ({
     [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]: details,
-    [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: { kind: 'feed' as const, details },
+    [HEALTH_CHECK_SOURCE_ACCESS_DENIED]: details,
   });
   const ACCESS_DENIED = (http_status: number) => (
-    [{ health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, health_check_metadata: { http_status } }]
+    [{ health_check_code: HEALTH_CHECK_SOURCE_ACCESS_DENIED, health_check_metadata: { http_status } }]
   );
 
-  it('should report SOURCE_OR_TARGET_ACCESS_DENIED instead of FEED_AND_SYNC_EXECUTION_FAILED on a 401', () => {
+  it('should report SOURCE_ACCESS_DENIED instead of FEED_AND_SYNC_EXECUTION_FAILED on a 401', () => {
     const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401, http_status_text: 'Unauthorized' }) });
     expect(checks).toEqual(ACCESS_DENIED(401));
   });
 
-  it.each([402, 403])('should report SOURCE_OR_TARGET_ACCESS_DENIED on a %s', (status) => {
+  it.each([402, 403])('should report SOURCE_ACCESS_DENIED on a %s', (status) => {
     const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: status }) });
     expect(checks).toEqual(ACCESS_DENIED(status));
   });
@@ -437,10 +433,10 @@ describe('source or target access denied check: feeds and syncs', () => {
     expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]);
   });
 
-  it('should report FEED_AND_SYNC_EXECUTION_FAILED again when SOURCE_OR_TARGET_ACCESS_DENIED is disabled', () => {
+  it('should report FEED_AND_SYNC_EXECUTION_FAILED again when SOURCE_ACCESS_DENIED is disabled', () => {
     const checks = computeIngestionHealthChecks(FAILED_FEED, {
       ...CONTEXT,
-      disabledHealthChecks: [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED],
+      disabledHealthChecks: [HEALTH_CHECK_SOURCE_ACCESS_DENIED],
       runtimeData: runtime({ http_status: 401 }),
     });
     expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED]);
@@ -450,190 +446,37 @@ describe('source or target access denied check: feeds and syncs', () => {
     expect(computeIngestionHealthChecks(FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401 }) })).toEqual([]);
   });
 
+  it('should not be enabled for a connector, managed or not: its access is not checked', () => {
+    const { isEnabled } = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_ACCESS_DENIED];
+    expect(isEnabled({ ...CONNECTOR, connector_type: 'EXTERNAL_IMPORT' }, NOT_PINGING)).toBe(false);
+    expect(isEnabled({ ...CONNECTOR, connector_type: 'STREAM', catalog_id: 'catalog-id' } as HealthCheckIngestor, NOT_PINGING)).toBe(false);
+  });
+
   it('should give a critical status', () => {
     const checks = computeIngestionHealthChecks(FAILED_FEED, { ...CONTEXT, runtimeData: runtime({ http_status: 401 }) });
     expect(computeIngestionHealthPatch({}, checks, CONTEXT)?.ingestion_health?.status).toBe(IngestionHealthStatus.Critical);
   });
 
-  it('should word the message for a feed', () => {
-    const [check] = toGraphqlHealthChecks(ACCESS_DENIED(401), 'IngestionRss');
+  it.each(['IngestionRss', 'Sync'])('should word the message for a %s', (entityType) => {
+    const [check] = toGraphqlHealthChecks(ACCESS_DENIED(401), entityType);
     expect(check.health_check_message).toBe('Source denied access: HTTP {http_status}');
     expect(check.health_check_severity).toBe(IngestionHealthCheckSeverity.Blocking);
     expect(check.health_check_kind).toBe(IngestionHealthCheckKind.Runtime);
   });
 
-  // The side is substituted by the backend, so that the front translates four fixed messages
-  it.each([
-    ['a source', { http_status: 401 }, 'Source denied access: HTTP {http_status}'],
-    ['a source with a host', { http_status: 401, host: 'api.example.com' }, 'Source denied access: HTTP {http_status} ({host})'],
-    ['a target', { http_status: 403, connector_type: 'STREAM' }, 'Target denied access: HTTP {http_status}'],
-    ['a target with a host', { http_status: 403, connector_type: 'STREAM', host: 'api.example.com' }, 'Target denied access: HTTP {http_status} ({host})'],
-  ])('should word the message for %s', (_, metadata, message) => {
-    const [check] = toGraphqlHealthChecks([{ health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, health_check_metadata: metadata }], 'Connector');
-    expect(check.health_check_message).toBe(message);
-  });
-
-  it('should read the details of the failing feeds and syncs, as feed values', async () => {
-    const readDetails = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED].getRuntimeData;
+  it('should read the details of the failing feeds and syncs', async () => {
+    const readDetails = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_ACCESS_DENIED].getRuntimeData;
     vi.mocked(redisGetIngestionLogHistory).mockImplementation(async (id: string) => (
       id === FAILED_FEED.internal_id
         ? [{ timestamp: 1, level: 'error', type: 'rss', identifier: 'feed', message: 'm', meta: { http_status: 401 } }]
         : []
     ));
     const values = await readDetails([FAILED_FEED, FAILED_SYNC], {} as RuntimeDataReadContext);
-    expect(values).toEqual(new Map([[FAILED_FEED.internal_id, { kind: 'feed', details: { http_status: 401 } }]]));
+    expect(values).toEqual(new Map([[FAILED_FEED.internal_id, { http_status: 401 }]]));
   });
 });
 
-describe('source or target access denied check: managed connectors', () => {
-  const MANAGED = { ...CONNECTOR, connector_type: 'EXTERNAL_IMPORT', catalog_id: 'catalog-id' };
-  const DENIED_MESSAGE = '401 Client Error: Unauthorized for url: https://api.example.com/x';
-  const DENIED_LINE = JSON.stringify({ timestamp: '2026-10-13T11:00:01Z', level: 'ERROR', message: DENIED_MESSAGE });
-  const DENIED = { http_status: 401, host: 'api.example.com', connector_type: 'EXTERNAL_IMPORT' };
-  const PROCESSED_AT = '2026-10-13T11:00:00Z';
-  const connectorState = (overrides: object) => ({ kind: 'connector', state: { connector_type: 'EXTERNAL_IMPORT', connector_info: null, ...overrides } });
-  const evaluate = (ingestor: HealthCheckIngestor, value: object, lastWorkValue?: object) => computeIngestionHealthChecks(ingestor, {
-    ...CONTEXT,
-    runtimeData: {
-      [HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED]: value as never,
-      ...(lastWorkValue ? { [HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]: lastWorkValue as never } : {}),
-    },
-  });
-  const accessDenied = (metadata: Record<string, unknown>) => [{ health_check_code: HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED, health_check_metadata: metadata }];
-
-  it('should not be enabled for an unmanaged connector', () => {
-    const { isEnabled } = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED];
-    expect(isEnabled({ ...MANAGED, catalog_id: null }, NOT_PINGING)).toBe(false);
-    expect(isEnabled({ ...MANAGED, catalog_id: '' }, NOT_PINGING)).toBe(false);
-    expect(isEnabled({ ...MANAGED, catalog_id: undefined }, NOT_PINGING)).toBe(false);
-    expect(isEnabled(MANAGED, NOT_PINGING)).toBe(true);
-  });
-
-  it('should conclude from the work: a 401 in the conclusive work, and supersede LAST_WORK_FAILED', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: DENIED_MESSAGE, source: null }] };
-    const checks = evaluate(MANAGED, connectorState({ last_work: work }), { connector_type: 'EXTERNAL_IMPORT', connector_info: null, last_work: work });
-    expect(checks).toEqual(accessDenied(DENIED));
-  });
-
-  it('should find the access denied in an error of the connector with a source, though the work did not fail', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: DENIED_MESSAGE, source: 'CONNECTOR' }] };
-    expect(evaluate(MANAGED, connectorState({ last_work: work }))).toEqual(accessDenied(DENIED));
-  });
-
-  it('should ignore the errors of the elements of the work', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: DENIED_MESSAGE, source: 'bundle element' }] };
-    expect(evaluate(MANAGED, connectorState({ last_work: work, composer_logs: [DENIED_LINE] }))).toEqual([]);
-  });
-
-  it('should stop at a conclusive work without error, whatever the logs hold', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [] };
-    expect(evaluate(MANAGED, connectorState({ last_work: work, composer_logs: [DENIED_LINE] }))).toEqual([]);
-  });
-
-  it('should stop at a conclusive work failed for another reason, whatever the logs hold', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: 'Timeout', source: null }] };
-    expect(evaluate(MANAGED, connectorState({ last_work: work, composer_logs: [DENIED_LINE] }))).toEqual([]);
-  });
-
-  // The processed work of the run before, the last run having left its work open (a connector publishing only its successes)
-  it('should fall back to the composer logs when the last processed work is older than the last run', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [] };
-    const state = connectorState({ last_work: work, connector_info: { last_run_datetime: '2026-10-13T11:30:00Z' }, composer_logs: [DENIED_LINE] });
-    expect(evaluate(MANAGED, state)).toEqual(accessDenied(DENIED));
-  });
-
-  it('should ignore the lines of the logs logged before the last processed work: a finished run judged the access then', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [] };
-    const olderLine = JSON.stringify({ timestamp: '2026-10-13T10:59:00Z', level: 'ERROR', message: DENIED_MESSAGE });
-    const state = connectorState({ last_work: work, connector_info: { last_run_datetime: '2026-10-13T11:30:00Z' }, composer_logs: [olderLine] });
-    expect(evaluate(MANAGED, state)).toEqual([]);
-  });
-
-  it('should only read the errors of the last 30 minutes of a stream: a revoked token repeats on every event', () => {
-    const STREAM = { ...MANAGED, connector_type: 'STREAM' };
-    const streamState = (timestamp: string) => connectorState({
-      connector_type: 'STREAM',
-      composer_logs: [JSON.stringify({ timestamp, level: 'ERROR', message: DENIED_MESSAGE })],
-    });
-    // Evaluated at 12:00
-    expect(evaluate(STREAM, streamState('2026-10-13T11:29:59Z'))).toEqual([]);
-    expect(evaluate(STREAM, streamState('2026-10-13T11:45:00Z'))).toEqual(accessDenied({ ...DENIED, connector_type: 'STREAM' }));
-  });
-
-  it('should fall back to the logs when every work was purged', () => {
-    expect(evaluate(MANAGED, connectorState({ composer_logs: [DENIED_LINE] }))).toEqual(accessDenied(DENIED));
-  });
-
-  it('should pass without work nor logs', () => {
-    expect(evaluate(MANAGED, connectorState({}))).toEqual([]);
-    expect(computeIngestionHealthChecks(MANAGED, { ...CONTEXT, runtimeData: {} })).toEqual([]);
-  });
-
-  it('should ignore a snapshot of logs too old to tell', () => {
-    const state = connectorState({ composer_logs: [DENIED_LINE], connector_info: { next_run_datetime: '2026-10-13T11:30:00Z' } });
-    expect(evaluate(MANAGED, state)).toEqual([]);
-  });
-
-  it('should not retain a status other than 401, 402, 403 in the logs', () => {
-    const line = JSON.stringify({ timestamp: '2026-10-13T11:00:01Z', level: 'ERROR', message: '429 Client Error: Too Many Requests for url: https://api.example.com/x' });
-    expect(evaluate(MANAGED, connectorState({ composer_logs: [line] }))).toEqual([]);
-  });
-
-  it('should tell the type of the connector, from its state', () => {
-    const state = connectorState({ connector_type: 'INTERNAL_ENRICHMENT', composer_logs: [DENIED_LINE] });
-    expect(evaluate(MANAGED, state)).toEqual(accessDenied({ ...DENIED, connector_type: 'INTERNAL_ENRICHMENT' }));
-  });
-
-  // A path no other rule of parseAccessDenied covers (/graphql, /storage/): only the host of the platform tells it
-  const PLATFORM_CALL = '401 Client Error: Unauthorized for url: https://platform.example.com/api/x';
-
-  it('should ignore a call to the platform itself in the logs', () => {
-    const line = JSON.stringify({ timestamp: '2026-10-13T11:00:01Z', level: 'ERROR', message: PLATFORM_CALL });
-    expect(evaluate(MANAGED, connectorState({ composer_logs: [line] }))).toEqual([]);
-  });
-
-  it('should ignore a call to the platform itself in the conclusive work', () => {
-    const work = { timestamp: 't', processed_time: PROCESSED_AT, errors: [{ message: PLATFORM_CALL, source: null }] };
-    expect(evaluate(MANAGED, connectorState({ last_work: work }))).toEqual([]);
-  });
-
-  it('should give a critical status', () => {
-    const checks = evaluate(MANAGED, connectorState({ composer_logs: [DENIED_LINE] }));
-    expect(computeIngestionHealthPatch({}, checks, CONTEXT)?.ingestion_health?.status).toBe(IngestionHealthStatus.Critical);
-  });
-
-  it('should word the message for a stream as the target', () => {
-    const [check] = toGraphqlHealthChecks(accessDenied({ http_status: 401, host: 'splunk.example.com', connector_type: 'STREAM' }), 'Connector');
-    expect(check.health_check_message).toBe('Target denied access: HTTP {http_status} ({host})');
-  });
-
-  it('should read the state of the managed connectors with the composer logs, and the details of the feeds and syncs', async () => {
-    const readValues = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED].getRuntimeData;
-    const failedFeed = { ...FEED, last_execution_status: 'error' };
-    const state = { connector_type: 'EXTERNAL_IMPORT', connector_info: null, composer_logs: [DENIED_LINE] };
-    vi.mocked(loadConnectorsRuntimeState).mockResolvedValue(new Map([[MANAGED.internal_id, state]]));
-    vi.mocked(redisGetIngestionLogHistory).mockResolvedValue([
-      { timestamp: 1, level: 'error', type: 'rss', identifier: 'feed', message: 'm', meta: { http_status: 403 } },
-    ]);
-    const read = {} as RuntimeDataReadContext;
-    const values = await readValues([MANAGED, failedFeed], read);
-    expect(loadConnectorsRuntimeState).toHaveBeenCalledWith([MANAGED], read, { withComposerLogs: true });
-    expect(values).toEqual(new Map([
-      [MANAGED.internal_id, { kind: 'connector', state }],
-      [failedFeed.internal_id, { kind: 'feed', details: { http_status: 403 } }],
-    ]));
-  });
-
-  it('should not read the state of connectors when there is none', async () => {
-    vi.mocked(loadConnectorsRuntimeState).mockClear();
-    const failedFeed = { ...FEED, last_execution_status: 'error' };
-    vi.mocked(redisGetIngestionLogHistory).mockResolvedValue([]);
-    await HEALTH_CHECK_REGISTRY[HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED].getRuntimeData([failedFeed], {} as RuntimeDataReadContext);
-    expect(loadConnectorsRuntimeState).not.toHaveBeenCalled();
-  });
-});
-
-describe('last work failed check', () => {
+describe('last run failed check', () => {
   const IMPORT_CONNECTOR = { ...CONNECTOR, connector_type: 'EXTERNAL_IMPORT' };
   const lastWork = (errors: ConnectorWorkError[]) => ({
     connector_type: 'EXTERNAL_IMPORT',
@@ -641,9 +484,9 @@ describe('last work failed check', () => {
     last_work: { timestamp: 't', processed_time: '2026-10-26T11:00:00Z', errors },
   });
   const evaluate = (ingestor: HealthCheckIngestor, value: object) => (
-    computeIngestionHealthChecks(ingestor, { ...CONTEXT, runtimeData: { [HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]: value as never } })
+    computeIngestionHealthChecks(ingestor, { ...CONTEXT, runtimeData: { [HEALTH_CHECK_LAST_RUN_FAILED]: value as never } })
   );
-  const failed = (error?: string) => [{ health_check_code: HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED, health_check_metadata: error === undefined ? {} : { error } }];
+  const failed = (error?: string) => [{ health_check_code: HEALTH_CHECK_LAST_RUN_FAILED, health_check_metadata: error === undefined ? {} : { error } }];
 
   it('should report the failure with the error, query string removed', () => {
     expect(evaluate(IMPORT_CONNECTOR, lastWork([{ message: 'Timeout calling https://api.example.com/x?key=secret', source: null }])))
@@ -714,26 +557,26 @@ describe('last work failed check', () => {
   });
 
   it.each(['EXTERNAL_IMPORT', 'INTERNAL_ENRICHMENT', 'INTERNAL_IMPORT_FILE', 'INTERNAL_EXPORT_FILE'])('should be enabled for a %s connector', (connectorType) => {
-    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED].isEnabled({ ...CONNECTOR, connector_type: connectorType }, NOT_PINGING)).toBe(true);
+    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_LAST_RUN_FAILED].isEnabled({ ...CONNECTOR, connector_type: connectorType }, NOT_PINGING)).toBe(true);
   });
 
   it('should not be enabled for a stream connector', () => {
-    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED].isEnabled({ ...CONNECTOR, connector_type: 'STREAM' }, NOT_PINGING)).toBe(false);
+    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_LAST_RUN_FAILED].isEnabled({ ...CONNECTOR, connector_type: 'STREAM' }, NOT_PINGING)).toBe(false);
   });
 
   it('should not be enabled for a feed or a sync', () => {
-    const { isEnabled } = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED];
+    const { isEnabled } = HEALTH_CHECK_REGISTRY[HEALTH_CHECK_LAST_RUN_FAILED];
     expect(isEnabled({ ...FEED, last_execution_status: 'error' }, NOT_PINGING)).toBe(false);
     expect(isEnabled({ ...SYNC, last_execution_status: 'error' }, NOT_PINGING)).toBe(false);
   });
 
-  it('should be enabled for an unmanaged connector, and still report a 401 there (no check supersedes it)', () => {
+  it('should report a 401 as a failed run: the access of a connector is not checked', () => {
     const checks = evaluate(IMPORT_CONNECTOR, lastWork([{ message: '401 Client Error: Unauthorized for url: https://api.example.com/x', source: null }]));
-    expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED]);
+    expect(checks.map((check) => check.health_check_code)).toEqual([HEALTH_CHECK_LAST_RUN_FAILED]);
   });
 
-  it('should be superseded by SOURCE_OR_TARGET_ACCESS_DENIED', () => {
-    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED].supersededBy).toBe(HEALTH_CHECK_SOURCE_OR_TARGET_ACCESS_DENIED);
+  it('should not be superseded by any check', () => {
+    expect(HEALTH_CHECK_REGISTRY[HEALTH_CHECK_LAST_RUN_FAILED]).not.toHaveProperty('supersededBy');
   });
 
   it('should make the status degraded (advisory runtime check)', () => {
@@ -741,8 +584,8 @@ describe('last work failed check', () => {
     const patch = computeIngestionHealthPatch({}, checks, CONTEXT);
     expect(patch?.ingestion_health?.status).toBe(IngestionHealthStatus.Degraded);
     expect(toGraphqlIngestionHealth(patch?.ingestion_health, CONNECTOR.entity_type)?.healthChecks).toEqual([{
-      health_check_code: HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED,
-      health_check_message: 'Last work failed: {error}',
+      health_check_code: HEALTH_CHECK_LAST_RUN_FAILED,
+      health_check_message: 'Last run failed: {error}',
       health_check_metadata: { error: 'boom' },
       health_check_kind: IngestionHealthCheckKind.Runtime,
       health_check_severity: IngestionHealthCheckSeverity.Advisory,
@@ -750,15 +593,15 @@ describe('last work failed check', () => {
   });
 
   it('should word the message without the error when there is none', () => {
-    expect(toGraphqlHealthChecks(failed(), 'Connector')[0].health_check_message).toBe('Last work failed');
+    expect(toGraphqlHealthChecks(failed(), 'Connector')[0].health_check_message).toBe('Last run failed');
   });
 
-  it('should read the state of the connectors with their last work, without the composer logs', async () => {
+  it('should read the state of the connectors with their last work', async () => {
     const state = new Map([[IMPORT_CONNECTOR.internal_id, lastWork([])]]);
     vi.mocked(loadConnectorsRuntimeState).mockResolvedValue(state);
     const read = {} as RuntimeDataReadContext;
-    expect(await HEALTH_CHECK_REGISTRY[HEALTH_CHECK_CONNECTOR_LAST_WORK_FAILED].getRuntimeData([IMPORT_CONNECTOR], read)).toBe(state);
-    expect(loadConnectorsRuntimeState).toHaveBeenCalledWith([IMPORT_CONNECTOR], read, { withComposerLogs: false });
+    expect(await HEALTH_CHECK_REGISTRY[HEALTH_CHECK_LAST_RUN_FAILED].getRuntimeData([IMPORT_CONNECTOR], read)).toBe(state);
+    expect(loadConnectorsRuntimeState).toHaveBeenCalledWith([IMPORT_CONNECTOR], read);
   });
 });
 
