@@ -26,6 +26,7 @@ import {
   computeHealthTransition,
   computeIngestionHealthChecks,
   computeIngestionHealthPatch,
+  type IngestionHealthEvaluationContext,
   isRuntimeCheckEnabled,
   markHealthNotified,
 } from '../modules/ingestionHealth/ingestionHealth-checks';
@@ -37,7 +38,6 @@ import {
   type HealthCheckUser,
   type RuntimeCheck,
   type RuntimeData,
-  type SourceIngestionHealthContext,
 } from '../modules/ingestionHealth/ingestionHealth-registry';
 import { publishUserAction } from '../listener/UserActionListener';
 import { HealthTransition, type IngestionHealthFields } from '../modules/ingestionHealth/ingestionHealth-types';
@@ -143,7 +143,7 @@ const evaluateIngestionHealth = async <T extends IngestionElement>(
   context: AuthContext,
   source: IngestionSource<T>,
   element: T,
-  sourceContext: SourceIngestionHealthContext,
+  sourceContext: IngestionHealthEvaluationContext,
 ) => {
   const healthContext = buildIngestionHealthContext(element, sourceContext);
   const checks = computeIngestionHealthChecks(element, healthContext);

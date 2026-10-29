@@ -13,6 +13,14 @@ import {
 import { HEALTH_CHECK_HEARTBEAT_MISSING, HEALTH_CHECK_REGISTRY, type HealthCheckCode, type HealthCheckDefinition, type RuntimeData } from './ingestionHealth-registry';
 import { isHeartbeatAlive } from './ingestionHealth-registry-utils';
 
+// The context of the evaluation of one ingestion: the context given to the checks, plus the values read by the runtime checks.
+// Declared here, not in ingestionHealth-types: RuntimeData is inferred from the registry, which depends on ingestionHealth-types.
+// The checks never read it from the context: a runtime check is given its own value only, by getFailure
+export interface IngestionHealthEvaluationContext extends SourceIngestionHealthContext {
+  // Values read by the runtime checks enabled for this ingestion, by check code: whether they are still fresh is judged here, not when read
+  runtimeData?: RuntimeData;
+}
+
 // A stored code can be unknown to this platform version (written by another one): undefined then
 const findHealthCheckDefinition = (code: string): HealthCheckDefinition | undefined => {
   return HEALTH_CHECK_REGISTRY[code as HealthCheckCode] as HealthCheckDefinition | undefined;
@@ -34,7 +42,7 @@ const getHealthCheckFailures = (
   code: HealthCheckCode,
   definition: HealthCheckDefinition,
   ingestor: HealthCheckIngestor,
-  context: SourceIngestionHealthContext,
+  context: IngestionHealthEvaluationContext,
 ): HealthCheckMetadata[] => {
   // The value type depends on each check, which a loop over all the checks cannot express: it is checked where the check is declared
   const runtimeData: Record<string, unknown> = context.runtimeData ?? {};
@@ -61,8 +69,8 @@ export const isRuntimeCheckEnabled = (ingestor: HealthCheckIngestor, context: Gl
 // A connector not pinging continuously still leaves a heartbeat after each run: kept, it would be healthy after every run.
 export const buildIngestionHealthContext = (
   ingestor: HealthCheckIngestor,
-  context: SourceIngestionHealthContext,
-): SourceIngestionHealthContext => {
+  context: IngestionHealthEvaluationContext,
+): IngestionHealthEvaluationContext => {
   const runtimeData: RuntimeData = context.runtimeData ?? {};
   const enabledRuntimeData: RuntimeData = R.pickBy((_, code) => HEALTH_CHECK_REGISTRY[code as HealthCheckCode].isEnabled(ingestor, context), runtimeData);
   return { ...context, runtimeData: enabledRuntimeData };
@@ -70,7 +78,7 @@ export const buildIngestionHealthContext = (
 
 export const computeIngestionHealthChecks = (
   ingestor: HealthCheckIngestor,
-  context: SourceIngestionHealthContext,
+  context: IngestionHealthEvaluationContext,
 ): StoredHealthCheck[] => {
   const failures = (Object.entries(HEALTH_CHECK_REGISTRY) as [HealthCheckCode, HealthCheckDefinition][]).flatMap(([code, definition]) => {
     // Disabled on the platform: never evaluated, a failure stored before is dropped at this period
@@ -89,7 +97,7 @@ export const computeIngestionHealthChecks = (
 
 // Priority: critical > degraded > healthy. A stopped ingestion is never evaluated (see the ingestion health manager).
 // Unknown when no status can be computed: no proof of life nor failure.
-export const computeHealthStatus = (checks: StoredHealthCheck[], { evaluatedAt, runtimeData = {} }: SourceIngestionHealthContext): IngestionHealthStatus => {
+export const computeHealthStatus = (checks: StoredHealthCheck[], { evaluatedAt, runtimeData = {} }: IngestionHealthEvaluationContext): IngestionHealthStatus => {
   // A code unknown to this platform version has no definition: it cannot change the status
   const healthChecks = checks
     .map((check) => findHealthCheckDefinition(check.health_check_code))
@@ -125,7 +133,7 @@ const normalizeHealthChecks = (checks: StoredHealthCheck[]): StoredHealthCheck[]
 export const computeIngestionHealthPatch = (
   current: IngestionHealthFields,
   checks: StoredHealthCheck[],
-  context: SourceIngestionHealthContext,
+  context: IngestionHealthEvaluationContext,
 ): IngestionHealthFields | null => {
   const { evaluatedAt } = context;
   const currentHealth = current.ingestion_health;
