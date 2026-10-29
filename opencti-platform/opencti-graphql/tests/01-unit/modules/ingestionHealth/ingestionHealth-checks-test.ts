@@ -273,7 +273,7 @@ describe('isRuntimeCheckEnabled', () => {
   });
 
   it('should be false for a stream once the reported errors checks are disabled on the platform: nothing to read', () => {
-    const disabledHealthChecks = [HEALTH_CHECK_CONNECTOR_ERROR_REPORTED, HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED];
+    const disabledHealthChecks: HealthCheckCode[] = [HEALTH_CHECK_CONNECTOR_ERROR_REPORTED, HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED];
     expect(isRuntimeCheckEnabled({ ...CONNECTOR, connector_type: 'STREAM' }, { ...CONTEXT, ...NOT_PINGING, disabledHealthChecks })).toBe(false);
   });
 
@@ -293,10 +293,15 @@ describe('isRuntimeCheckEnabled', () => {
   });
 
   it('should be false when the only runtime check enabled for the ingestion is disabled on the platform: nothing to read', () => {
-    const connectorChecks = [HEALTH_CHECK_HEARTBEAT_MISSING, HEALTH_CHECK_LAST_RUN_FAILED, HEALTH_CHECK_CONNECTOR_ERROR_REPORTED, HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED];
+    const connectorChecks: HealthCheckCode[] = [
+      HEALTH_CHECK_HEARTBEAT_MISSING,
+      HEALTH_CHECK_LAST_RUN_FAILED,
+      HEALTH_CHECK_CONNECTOR_ERROR_REPORTED,
+      HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED,
+    ];
     expect(isRuntimeCheckEnabled(CONNECTOR, { ...CONTEXT, ...PINGING, disabledHealthChecks: connectorChecks })).toBe(false);
     const failingFeed = { ...FEED, last_execution_status: 'error' };
-    const feedChecks = [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, HEALTH_CHECK_SOURCE_ACCESS_DENIED];
+    const feedChecks: HealthCheckCode[] = [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED, HEALTH_CHECK_SOURCE_ACCESS_DENIED];
     expect(isRuntimeCheckEnabled(failingFeed, { ...CONTEXT, ...NOT_PINGING, disabledHealthChecks: feedChecks })).toBe(false);
     // Another check disabled: still read
     expect(isRuntimeCheckEnabled(CONNECTOR, { ...CONTEXT, ...PINGING, disabledHealthChecks: [HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED] })).toBe(true);
@@ -679,7 +684,7 @@ describe('connector reported errors checks', () => {
   });
 
   it('should be enabled for every connector, pinging or not, and nothing else', () => {
-    [HEALTH_CHECK_CONNECTOR_ERROR_REPORTED, HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED].forEach((code) => {
+    ([HEALTH_CHECK_CONNECTOR_ERROR_REPORTED, HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED] as const).forEach((code) => {
       const { isEnabled } = HEALTH_CHECK_REGISTRY[code];
       expect(isEnabled(CONNECTOR, NOT_PINGING)).toBe(true);
       expect(isEnabled({ ...CONNECTOR, connector_type: 'STREAM' }, NOT_PINGING)).toBe(true);
