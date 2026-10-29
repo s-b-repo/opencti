@@ -10,7 +10,14 @@ import {
   type SourceIngestionHealthContext,
   type GlobalIngestionHealthContext,
 } from './ingestionHealth-types';
-import { HEALTH_CHECK_HEARTBEAT_MISSING, HEALTH_CHECK_REGISTRY, type HealthCheckCode, type HealthCheckDefinition, type RuntimeData } from './ingestionHealth-registry';
+import {
+  HEALTH_CHECK_HEARTBEAT_MISSING,
+  HEALTH_CHECK_REGISTRY,
+  type HealthCheckCode,
+  type HealthCheckDefinition,
+  type RegisteredRuntimeCheck,
+  type RuntimeData,
+} from './ingestionHealth-registry';
 import { isHeartbeatAlive } from './ingestionHealth-registry-utils';
 
 // The context of the evaluation of one ingestion: the context given to the checks, plus the values read by the runtime checks.
@@ -56,13 +63,17 @@ const getHealthCheckFailures = (
   return failures.length > 0 ? failures : [{}];
 };
 
+// The runtime checks of the registry not disabled on the platform: the only ones whose runtime data is read
+export const getEnabledRuntimeChecks = (context: GlobalIngestionHealthContext): [HealthCheckCode, RegisteredRuntimeCheck][] => {
+  return Object.entries(HEALTH_CHECK_REGISTRY)
+    .filter((entry): entry is [HealthCheckCode, RegisteredRuntimeCheck] => entry[1].kind === IngestionHealthCheckKind.Runtime)
+    .filter(([code]) => !context.disabledHealthChecks?.includes(code));
+};
+
 // Whether a runtime check is enabled for the ingestor: its runtime data must be read before it is evaluated.
 // A check disabled on the platform is not read: an ingestor depending on it only needs no runtime data
 export const isRuntimeCheckEnabled = (ingestor: HealthCheckIngestor, context: GlobalIngestionHealthContext): boolean => {
-  return (Object.entries(HEALTH_CHECK_REGISTRY) as [HealthCheckCode, HealthCheckDefinition][])
-    .some(([code, definition]) => definition.kind === IngestionHealthCheckKind.Runtime
-      && !context.disabledHealthChecks?.includes(code)
-      && definition.isEnabled(ingestor, context));
+  return getEnabledRuntimeChecks(context).some(([, definition]) => definition.isEnabled(ingestor, context));
 };
 
 // Keeps only the runtime values of the checks enabled for the ingestor: a value read for a disabled check proves nothing.

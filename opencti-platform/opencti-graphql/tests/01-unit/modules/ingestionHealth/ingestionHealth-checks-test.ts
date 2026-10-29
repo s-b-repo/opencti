@@ -14,7 +14,6 @@ import {
   toGraphqlIngestionHealth,
 } from '../../../../src/modules/ingestionHealth/ingestionHealth-checks';
 import {
-  CONNECTOR_ERROR_BLOCKING_CRITICITY,
   HEALTH_CHECK_CONNECTOR_CRITICAL_ERROR_REPORTED,
   HEALTH_CHECK_CONNECTOR_ERROR_REPORTED,
   HEALTH_CHECK_FEED_AND_SYNC_EXECUTION_FAILED,
@@ -26,16 +25,22 @@ import {
   HEALTH_CHECK_USER_MISSING_CAPABILITY,
   HEALTH_CHECK_USER_NOT_SERVICE_ACCOUNT,
   type HealthCheckCode,
-  type HealthCheckIngestor,
-  type HealthCheckUser,
-  type RuntimeDataReadContext,
 } from '../../../../src/modules/ingestionHealth/ingestionHealth-registry';
 import { CONNECTOR_LIVELINESS_GRACE_PERIOD_MS } from '../../../../src/modules/connector/connector-types';
 import { redisGetConnectorErrors } from '../../../../src/modules/connector/connector-redis';
 import { utcDate } from '../../../../src/utils/format';
 import { IngestionHealthCheckKind, IngestionHealthCheckSeverity, IngestionHealthStatus } from '../../../../src/generated/graphql';
 import { type ConnectorWorkError, loadConnectorsRuntimeState } from '../../../../src/modules/ingestionHealth/ingestionHealth-connectorWorks';
-import { HealthTransition, type IngestionHealthFields, type StoredHealthCheck, type StoredIngestionHealth } from '../../../../src/modules/ingestionHealth/ingestionHealth-types';
+import {
+  type HealthCheckIngestor,
+  type HealthCheckUser,
+  HealthTransition,
+  type IngestionHealthFields,
+  type RuntimeDataReadContext,
+  type StoredHealthCheck,
+  type StoredIngestionHealth,
+} from '../../../../src/modules/ingestionHealth/ingestionHealth-types';
+import { CONNECTOR_ERROR_BLOCKING_CRITICITY } from '../../../../src/modules/ingestionHealth/ingestionHealth-registry-utils';
 
 vi.mock('../../../../src/database/redis', async (importActual) => ({
   ...(await importActual<typeof import('../../../../src/database/redis')>()),
