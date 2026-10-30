@@ -14,6 +14,7 @@ import {
   selectAllConfigPresetItems,
   toggleConfigPresetItem,
   toggleConfigPresetTypes,
+  withConfigPresetItemsChecked,
 } from './configPresetSelection';
 
 const platformSettings = { key: 'platformSettings', label: 'Platform settings' };
@@ -71,6 +72,20 @@ describe('configPresetSelection', () => {
     // No duplicates
     expect(toggleConfigPresetItem(one, 'branding', 'theme-1', true).branding).toEqual({ mode: 'some', ids: ['theme-1'] });
     expect(toggleConfigPresetItem(one, 'branding', 'theme-1', false).branding).toEqual({ mode: 'some', ids: [] });
+  });
+
+  it('checks or unchecks a list of items across types, leaving the others as they are', () => {
+    const items = [{ type: 'whitemark', key: 'whitemark' }, { type: 'messages', key: 'banner' }];
+    const unchecked = withConfigPresetItemsChecked(selectAllConfigPresetItems([{ key: 'whitemark' }, { key: 'messages' }, { key: 'platform' }]), items, false);
+    expect(isConfigPresetItemSelected(unchecked, 'whitemark', 'whitemark')).toBe(false);
+    expect(isConfigPresetItemSelected(unchecked, 'messages', 'banner')).toBe(false);
+    expect(isConfigPresetItemSelected(unchecked, 'messages', 'login')).toBe(true);
+    expect(isConfigPresetItemSelected(unchecked, 'platform', 'platform')).toBe(true);
+    const checked = withConfigPresetItemsChecked(unchecked, items, true);
+    expect(isConfigPresetItemSelected(checked, 'whitemark', 'whitemark')).toBe(true);
+    expect(isConfigPresetItemSelected(checked, 'messages', 'banner')).toBe(true);
+    // A type that was not in the selection at all
+    expect(isConfigPresetItemSelected(withConfigPresetItemsChecked({}, items, false), 'whitemark', 'whitemark')).toBe(false);
   });
 
   it('switches a whole type to all or none, clearing its exceptions', () => {

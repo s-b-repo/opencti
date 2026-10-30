@@ -127,6 +127,17 @@ export const toggleConfigPresetItem = (selection: ConfigPresetSelection, typeKey
   return { ...selection, [typeKey]: { mode, ids: listed ? [...others, itemKey] : others } };
 };
 
+// The items of a type, by type key and item key
+export interface ConfigPresetItemKey {
+  readonly type: string;
+  readonly key: string;
+}
+
+// The selection with these items checked, or unchecked: the other items are left as they are
+export const withConfigPresetItemsChecked = (selection: ConfigPresetSelection, items: ReadonlyArray<ConfigPresetItemKey>, checked: boolean): ConfigPresetSelection => {
+  return items.reduce((current, { type, key }) => toggleConfigPresetItem(current, type, key, checked), selection);
+};
+
 // Keys and excluded keys (ids and excludedIds) of the items query for a filter of the sub-view
 export const buildConfigPresetItemsFilter = (
   selection: ConfigPresetSelection,
