@@ -101,6 +101,13 @@ describe('configPresetSelection', () => {
     expect(getConfigPresetCheckboxState([branding], all, NO_FORCED)).toBe(true);
     expect(getConfigPresetCheckboxState([branding], toggleConfigPresetItem(all, 'branding', 'theme-1', false), NO_FORCED)).toBe('indeterminate');
     expect(getConfigPresetCheckboxState([platform, messages], toggleConfigPresetTypes(all, [messages], false), NO_FORCED)).toBe('indeterminate');
+    // An unselectable item stays unchecked: it does not keep the checkbox from being checked, but the other items still count
+    const lockedPlatform = toggleConfigPresetItem(all, 'platform', 'platform', false);
+    const locked = [{ type: 'platform', key: 'platform' }];
+    expect(getConfigPresetCheckboxState([platform, messages], lockedPlatform, NO_FORCED)).toBe('indeterminate');
+    expect(getConfigPresetCheckboxState([platform, messages], lockedPlatform, NO_FORCED, locked)).toBe(true);
+    expect(getConfigPresetCheckboxState([platform, messages], toggleConfigPresetTypes(lockedPlatform, [messages], false), NO_FORCED, locked)).toBe(false);
+    expect(getConfigPresetCheckboxState([messages], all, NO_FORCED, locked)).toBe(true);
   });
 
   it('forces the items a selected item depends on, which count as checked and cannot be excluded', () => {

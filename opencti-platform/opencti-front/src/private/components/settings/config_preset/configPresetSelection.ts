@@ -98,16 +98,19 @@ export const countConfigPresetCheckedItems = (types: ReadonlyArray<CountedType>,
 };
 
 // State of the checkbox of a type or a group: checked when all its items are, indeterminate when only some are
+// unselectable: items that stay unchecked, they do not keep the checkbox from being checked, so that it can be cleared again
 export const getConfigPresetCheckboxState = (
   types: ReadonlyArray<CountedType>,
   selection: ConfigPresetSelection,
   forced: ConfigPresetForcedItems,
+  unselectable: ReadonlyArray<ConfigPresetItemKey> = [],
 ): boolean | 'indeterminate' => {
   const checkedCount = countConfigPresetCheckedItems(types, selection, forced);
   if (checkedCount === 0) {
     return false;
   }
-  return checkedCount === countConfigPresetItems(types) ? true : 'indeterminate';
+  const unselectableCount = unselectable.filter(({ type }) => types.some(({ key }) => key === type)).length;
+  return checkedCount === countConfigPresetItems(types) - unselectableCount ? true : 'indeterminate';
 };
 
 // Every item or none, without exceptions

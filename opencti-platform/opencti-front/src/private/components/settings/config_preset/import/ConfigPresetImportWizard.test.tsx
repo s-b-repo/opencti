@@ -289,7 +289,19 @@ describe('ConfigPresetImportWizard', () => {
         // Checking the whole group selects everything it holds but the item behind the gate
         await user.click(checkbox('Messages (1/1)'));
         await user.click(checkbox('Platform settings (3/5)'));
-        expect(checkbox('Platform settings (4/5)')).toHaveAttribute('data-state', 'indeterminate');
+        // Everything that can be selected is: the group shows as checked, though the item behind the gate is not
+        expect(checkbox('Platform settings (4/5)')).toHaveAttribute('data-state', 'checked');
+        expect(whitemarkRow().getByRole('checkbox', { hidden: true })).toHaveAttribute('data-state', 'unchecked');
+      });
+
+      it('lets a group that holds it be cleared as a whole, and checked again, without ever selecting it', async () => {
+        const { user } = await renderPreview(session(), [], previewWithWhitemark);
+        // Everything is selected but the item behind the gate: the group shows as checked
+        expect(checkbox('Platform settings (4/5)')).toHaveAttribute('data-state', 'checked');
+        await user.click(checkbox('Platform settings (4/5)'));
+        expect(checkbox('Platform settings (0/5)')).toHaveAttribute('data-state', 'unchecked');
+        await user.click(checkbox('Platform settings (0/5)'));
+        expect(checkbox('Platform settings (4/5)')).toHaveAttribute('data-state', 'checked');
         expect(whitemarkRow().getByRole('checkbox', { hidden: true })).toHaveAttribute('data-state', 'unchecked');
       });
 

@@ -402,6 +402,7 @@ const ConfigPresetImportPreview: FunctionComponent<ConfigPresetImportPreviewProp
         selection={selection}
         forced={forced}
         expandTypes
+        unselectable={lockedItems}
         onSelectionChange={handleSelectionChange}
         renderTypeActions={(type) => {
           // From two items in conflict that are imported: with one, its own choice is enough, and an item that is not imported has none
