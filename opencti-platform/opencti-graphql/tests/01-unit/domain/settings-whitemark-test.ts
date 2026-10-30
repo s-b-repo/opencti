@@ -66,6 +66,19 @@ describe('settingsEditField, the whitemark', () => {
     expect(updateAttribute).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses a whitemark turned on by a repeated key, whatever its position, and writes nothing', async () => {
+    vi.mocked(checkEnterpriseEdition).mockRejectedValue(UnsupportedError('Enterprise edition is not enabled'));
+    await expect(settingsEditField(context, bypassUser, 'settings-id', [
+      { key: 'platform_whitemark', value: ['false'] },
+      { key: 'platform_whitemark', value: ['true'] },
+    ])).rejects.toThrow('Enterprise edition is not enabled');
+    await expect(settingsEditField(context, bypassUser, 'settings-id', [
+      { key: 'platform_whitemark', value: ['true'] },
+      { key: 'platform_whitemark', value: ['false'] },
+    ])).rejects.toThrow('Enterprise edition is not enabled');
+    expect(updateAttribute).not.toHaveBeenCalled();
+  });
+
   it('does not look at the Enterprise Edition for another setting', async () => {
     vi.mocked(checkEnterpriseEdition).mockRejectedValue(UnsupportedError('Enterprise edition is not enabled'));
     await settingsEditField(context, bypassUser, 'settings-id', [{ key: 'platform_title', value: ['My platform'] }]);
